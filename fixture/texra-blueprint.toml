@@ -1,0 +1,12 @@
+[paper_gaps]
+dir        = "docs/paper-gaps"
+site_base  = "https://example.github.io/fixture"
+blob_base  = "https://github.com/example/fixture/blob/main/docs/paper-gaps"
+bib_author = "The {Fixture} contributors"
+institution = "Fixture"
+title      = "Fixture paper-gap notes"
+scan_roots = ["blueprint/src"]
+
+[paper_gaps.sources]
+demo = "arXiv:0000.00000 (a model source)"
+self = "internal theorem-surface audit, no single external source"

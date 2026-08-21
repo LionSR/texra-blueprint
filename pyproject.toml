@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "texra-blueprint"
+version = "0.1.0"
+description = "Shared plasTeX plugin and site tooling for Lean blueprint projects"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "texra-ai" }]
+# The plasTeX patch layer binds to private methods of these exact releases.
+# A version bump is a texra-blueprint release, tested against the fixture,
+# never an incidental upgrade in a consumer.
+dependencies = [
+  "plasTeX==3.1",
+  "plastexdepgraph==0.0.5",
+  "plastexshowmore==0.0.2",
+  "leanblueprint==0.0.20",
+  "pybtex==0.26.1",
+]
+
+[project.scripts]
+texra-blueprint = "texra_blueprint.cli:main"
+
+[project.urls]
+Repository = "https://github.com/texra-ai/texra-blueprint"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+texra_blueprint = ["Packages/renderer_templates/*.jinja2s"]

@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install Graphviz headers (pygraphviz build)
+        run: sudo apt-get update && sudo apt-get install -y graphviz libgraphviz-dev
+      - name: Install package
+        run: pip install -e . pytest
+      - name: Run tests (unit + fixture render)
+        run: pytest -q

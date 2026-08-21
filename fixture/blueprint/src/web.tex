@@ -1,0 +1,59 @@
+\documentclass{report}
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[numbers,square]{natbib}
+\usepackage{hyperref}
+\usepackage[showmore, dep_graph]{blueprint}
+\usepackage{texra_patches}
+
+\newtheorem{theorem}{Theorem}
+
+\home{..}
+\github{https://github.com/example/fixture}
+\dochome{../docs}
+
+\title{Fixture blueprint}
+\author{The Fixture contributors}
+
+\begin{document}
+\maketitle
+
+\chapter{Patched constructions}
+
+A file path in prose: \path{Fixture/Basic_file.lean}, and a citation
+\cite{Model2020}.
+
+\begin{samepage}
+\begin{theorem}[Base result]
+    \label{thm:base_result}
+    \lean{Fixture.baseResult, Fixture.baseResult}
+    \leanok
+    A label with an underscore inside a display survives:
+    \begin{align}
+        [A, B] &= AB - BA, \label{eq:comm_bracket}\\[\jot]
+        \begin{psmallmatrix} 1 & 0 \\ 0 & 1 \end{psmallmatrix} x &= x.
+    \end{align}
+    The bracketed commutator after the row break in
+    \eqref{eq:comm_bracket} is mathematics, not a length:
+    \begin{align}
+        c &= d \\
+        [P, Q] &= 0.
+    \end{align}
+\end{theorem}
+\begin{proof}\leanok Immediate. \end{proof}
+\end{samepage}
+
+\begin{theorem}[Dependent result]
+    \label{thm:dependent_result}
+    \lean{Fixture.dependentResult}
+    \leanok
+    \uses{thm:base_result}
+    Follows from Theorem~\ref{thm:base_result}, with a scope note recorded in
+    \path{docs/paper-gaps/demo_scope_restriction.tex}.
+\end{theorem}
+\begin{proof}\leanok\uses{thm:base_result} By the base result. \end{proof}
+
+\bibliographystyle{alpha}
+\bibliography{references}
+
+\end{document}

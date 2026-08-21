@@ -1,0 +1,8 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+fixture/blueprint/web/
+fixture/docs/paper-gaps/*.pdf
+fixture/docs/paper-gaps/*.aux
+fixture/docs/paper-gaps/*.log
