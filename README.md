@@ -28,8 +28,10 @@ package carries it until the fix lands upstream.
 
 **A CLI** (`texra-blueprint`) for the paper-gap note apparatus: a published,
 citable index of the notes recording where a formalization deviates from its
-cited sources, and a CI check that every reference resolves and every note
-name carries a registered source key.
+cited sources, a CI check that every reference resolves and every note
+name carries a registered source key, and a scaffold command that seeds a
+project's notes directory from the package's canonical protocol files.
+The same CLI wraps `leanblueprint web` in a strict renderer-failure gate.
 
 ## Use
 
@@ -51,10 +53,30 @@ Repository root: a `texra-blueprint.toml` with a `[paper_gaps]` table — see
 `fixture/texra-blueprint.toml` for a complete example. Then:
 
 ```bash
+texra-blueprint paper-gaps init        # scaffold docs/paper-gaps (--dir, --force)
 texra-blueprint paper-gaps check       # CI gate
 texra-blueprint paper-gaps build       # latexmk over the notes
 texra-blueprint paper-gaps site OUT    # index + PDFs + paper-gaps.bib
 ```
+
+`paper-gaps init` copies the canonical protocol scaffold — `command.tex`
+(shared notation and the `\gapnote{<kind>}{<status>}` verdict marker),
+`policy.tex` (the policy note), and `template.tex` (a model note) — into the
+notes directory. The package copy is the single source of these files;
+existing files are kept untouched unless `--force`.
+
+The strict web build:
+
+```bash
+texra-blueprint web                    # leanblueprint web + renderer gate
+texra-blueprint web -- ARGS            # ARGS pass through to leanblueprint web
+```
+
+runs `leanblueprint web`, streams its output, and exits nonzero when any
+line matches the canonical renderer-failure vocabulary
+(`RENDER_FAILURE_PATTERNS` in `texra_blueprint.web`): an unrecognized
+command or environment, a default-renderer fallback, or a plasTeX `ERROR:`
+line — replacing the per-workflow `tee`/`grep` pipelines.
 
 A project observing a specific mangled `\lean` name extends the repair map
 from its own local package:

@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from texra_blueprint import __version__, papergaps
+from texra_blueprint import __version__, papergaps, web
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--root", type=Path, default=Path.cwd(),
         help="repository root holding texra-blueprint.toml (default: cwd)")
-    sub = parser.add_subparsers(required=True)
+    sub = parser.add_subparsers(dest="command", required=True)
 
     pg = sub.add_parser("paper-gaps", help="paper-gap note machinery")
     pg_sub = pg.add_subparsers(dest="pg_command", required=True)
@@ -26,8 +26,35 @@ def main(argv: list[str] | None = None) -> int:
     site.add_argument("out_dir", type=Path)
     pg_sub.add_parser("check", help="verify references and source keys")
     pg_sub.add_parser("build", help="compile the notes to PDF with latexmk")
+    init = pg_sub.add_parser(
+        "init", help="copy the canonical scaffold (command.tex, policy.tex, "
+        "template.tex) into a notes directory")
+    init.add_argument(
+        "--dir", type=Path, default=Path("docs/paper-gaps"),
+        help="target directory, resolved against --root when relative "
+        "(default: docs/paper-gaps)")
+    init.add_argument(
+        "--force", action="store_true", help="overwrite existing files")
+
+    webp = sub.add_parser(
+        "web", help="leanblueprint web with a strict renderer-failure gate")
+    webp.add_argument(
+        "web_args", nargs=argparse.REMAINDER, metavar="-- ARGS",
+        help="arguments passed through to leanblueprint web")
 
     args = parser.parse_args(argv)
+
+    if args.command == "web":
+        extra = args.web_args
+        if extra and extra[0] == "--":
+            extra = extra[1:]
+        return web.run_web(extra)
+
+    if args.pg_command == "init":
+        target = args.dir if args.dir.is_absolute() \
+            else args.root.resolve() / args.dir
+        return papergaps.init_scaffold(target, force=args.force)
+
     cfg = papergaps.Config.load(args.root.resolve())
 
     if args.pg_command == "site":

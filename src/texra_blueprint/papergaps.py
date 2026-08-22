@@ -42,7 +42,9 @@ the old name while verifying that the target exists.  Keys listed in
 index page — one heading per source when two registered keys cite the
 same source.
 
-Subcommands (via ``texra-blueprint paper-gaps``): ``site OUT_DIR`` builds
+Subcommands (via ``texra-blueprint paper-gaps``): ``init`` seeds a notes
+directory with the canonical scaffold (``command.tex``, ``policy.tex``,
+``template.tex``) shipped as package data; ``site OUT_DIR`` builds
 the grouped index, copies the note PDFs, and writes ``paper-gaps.bib``;
 ``build`` compiles the notes to PDF with latexmk; ``check`` fails when a
 referenced note is missing, when a note's name is not a registered source
@@ -58,6 +60,7 @@ import concurrent.futures
 import datetime
 import functools
 import html
+import importlib.resources
 import os
 import re
 import shutil
@@ -684,6 +687,31 @@ permanent URL <code>{cfg.site_base}/paper-gaps/&lt;name&gt;.pdf</code> or via
                                     encoding="utf-8")
     print(f"paper-gaps site: {len(notes)} notes, {copied} PDFs, "
           f"{sum(n.citations for n in notes.values())} citations resolved")
+
+
+# The scaffold shipped by ``paper-gaps init``: the shared command file, the
+# policy note, and the model note.  The package copy is the canonical
+# protocol text; consumers receive it from here rather than vendoring it.
+SCAFFOLD_FILES = ("command.tex", "policy.tex", "template.tex")
+
+
+def init_scaffold(target: Path, force: bool = False) -> int:
+    """Copy the paper-gap scaffold files into ``target``.
+
+    An existing file is left untouched (with a notice) unless ``force``;
+    the directory is created if needed.
+    """
+    source = importlib.resources.files("texra_blueprint") / "paper_gaps_scaffold"
+    target.mkdir(parents=True, exist_ok=True)
+    for name in SCAFFOLD_FILES:
+        dest = target / name
+        if dest.exists() and not force:
+            print(f"kept existing {dest} (use --force to overwrite)")
+            continue
+        dest.write_text((source / name).read_text(encoding="utf-8"),
+                        encoding="utf-8")
+        print(f"wrote {dest}")
+    return 0
 
 
 def build_pdfs(cfg: Config) -> int:
