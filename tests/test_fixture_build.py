@@ -14,6 +14,7 @@ FIXTURE = Path(__file__).parent.parent / "fixture"
 def built_site(tmp_path_factory):
     work = tmp_path_factory.mktemp("fixture-build")
     shutil.copytree(FIXTURE / "blueprint", work / "blueprint")
+    shutil.copy2(FIXTURE / "texra-blueprint.toml", work / "texra-blueprint.toml")
     src = work / "blueprint" / "src"
     # Invoke plasTeX through the running interpreter so the build sees the
     # same environment the tests import texra_blueprint from (a bare
@@ -60,3 +61,16 @@ def test_unresolved_citation_fallback(built_site):
     # no web.bbl in the fixture: the natbib fallback patch renders the key
     # instead of empty parentheses
     assert "Model2020" in text
+
+
+def test_chapter_and_subset_graphs(built_site):
+    web, _, _ = built_site
+    chapter = (web / "dep_graph_chapter_1.html")
+    cone = (web / "dep_graph_subset_base_cone.html")
+    assert chapter.exists() and cone.exists()
+    cone_text = cone.read_text()
+    assert "thm:base_result" in cone_text and "thm:dependent_result" in cone_text
+    # TOC links the extra graphs
+    index = (web / "index.html").read_text()
+    assert "Dependent-result cone" in index
+    assert "Chapter 1 graph" in index

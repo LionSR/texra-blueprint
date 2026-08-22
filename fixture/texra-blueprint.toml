@@ -10,3 +10,9 @@ scan_roots = ["blueprint/src"]
 [paper_gaps.sources]
 demo = "arXiv:0000.00000 (a model source)"
 self = "internal theorem-surface audit, no single external source"
+
+[blueprint.graphs]
+by_chapter = true
+
+[blueprint.graphs.subsets]
+base_cone = { ancestors_of = "thm:dependent_result", title = "Dependent-result cone" }
