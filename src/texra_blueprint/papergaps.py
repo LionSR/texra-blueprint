@@ -54,15 +54,20 @@ checkdecls`` fails on an unresolved declaration.
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime
+import functools
 import html
+import os
 import re
 import shutil
 import subprocess
-import tomllib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+
+from texra_blueprint.config import load_table
+from texra_blueprint.pages import html_page
 
 REF_RE = re.compile(r"paper-gaps/([A-Za-z0-9_\-]+)\.tex")
 
@@ -78,7 +83,13 @@ KIND_SEVERITY = {
     "local-correction": "medium",
     "clarification": "low",
 }
-STATUSES = {"open", "resolved", "historical"}
+SEVERITIES = ("high", "medium", "low")
+_SEV_ORDER = {sev: rank for rank, sev in enumerate(SEVERITIES)}
+SETTLED_STATUSES = ("resolved", "historical")
+STATUSES = {"open", *SETTLED_STATUSES}
+
+_DATE_LINE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_VERSION_SUFFIX_RE = re.compile(r"[_-]v\d+$")
 
 
 def source_key(slug: str, sources: dict[str, str]) -> str | None:
@@ -89,12 +100,10 @@ def source_key(slug: str, sources: dict[str, str]) -> str | None:
     (key ``issue``), and a full-stem key all resolve, whatever the
     separator convention.
     """
-    best = None
-    for key in sources:
-        if slug == key or slug.startswith(key + "_") or slug.startswith(key + "-"):
-            if best is None or len(key) > len(best):
-                best = key
-    return best
+    return max(
+        (key for key in sources
+         if slug == key or slug.startswith((key + "_", key + "-"))),
+        key=len, default=None)
 
 
 # --------------------------------------------------------------------------
@@ -120,14 +129,7 @@ class Config:
 
     @classmethod
     def load(cls, root: Path) -> "Config":
-        path = root / "texra-blueprint.toml"
-        if not path.exists():
-            raise SystemExit(f"texra-blueprint.toml not found at {root}")
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-        try:
-            c = data["paper_gaps"]
-        except KeyError:
-            raise SystemExit("texra-blueprint.toml has no [paper_gaps] table")
+        c = load_table(root, "paper_gaps", required=True)
         return cls(
             root=root,
             gaps=root / c.get("dir", "docs/paper-gaps"),
@@ -137,36 +139,97 @@ class Config:
             institution=c.get("institution", "the formalization"),
             title=c.get("title", "Paper-gap notes"),
             scan_roots=list(c.get("scan_roots", [])),
-            skip=set(c.get("skip", ["command.tex", "template.tex"]))
-            | {"references.bib"},
+            skip=set(c.get("skip", ["command.tex", "template.tex"])),
             policy=c.get("policy", "policy.tex"),
             sources=dict(c.get("sources", {})),
-            require_verdict=bool(c.get("require_verdict", False)),
             aliases=dict(c.get("aliases", {})),
             group_aliases=dict(c.get("group_aliases", {})),
+            require_verdict=bool(c.get("require_verdict", False)),
         )
+
+    def note_paths(self, include_policy: bool = False) -> list[Path]:
+        """The note files, sorted, with the skip list and policy applied."""
+        return [
+            p for p in sorted(self.gaps.glob("*.tex"))
+            if p.name not in self.skip
+            and (include_policy or p.name != self.policy)
+        ]
+
+    @functools.cached_property
+    def _note_dates(self) -> dict[str, str]:
+        """Last-commit date per note file name, from one ``git log`` pass.
+
+        ``git log`` lists commits newest first, so the first date printed
+        above a file name is the file's last-modified date; ``setdefault``
+        keeps that first occurrence.  Names are keyed by basename — the
+        notes live in one directory — so the map is independent of where
+        the repository root sits relative to ``self.root``.
+        """
+        out = subprocess.run(
+            ["git", "log", "--format=%as", "--name-only", "--", str(self.gaps)],
+            cwd=self.root, capture_output=True, text=True,
+        ).stdout
+        dates: dict[str, str] = {}
+        current = ""
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if _DATE_LINE_RE.fullmatch(line):
+                current = line
+            elif current:
+                dates.setdefault(Path(line).name, current)
+        return dates
+
+    def git_date(self, path: Path) -> str:
+        return self._note_dates.get(path.name, "n.d.")
 
 
 # --------------------------------------------------------------------------
 # TeX parsing
 
 
+# One sweep for the font commands whose braced argument is kept; a bare
+# ``\mathcal`` (no braces) is stripped by the same pattern with the
+# argument group empty.
+_FONT_ARG_RE = re.compile(
+    r"\\(?:path|texttt|leanid|emph|textit|textbf|textsc)\s*{([^{}]*)}")
+_MATH_FONT_ARG_RE = re.compile(
+    r"\\(?:text|mathrm|mathbb)\s*{([^{}]*)}|\\mathcal\s*(?:{([^{}]*)})?")
+_SIZE_RE = re.compile(r"\\(?:large|Large|small|footnotesize|normalsize)\b\s*")
+_STRAY_BRACE_RE = re.compile(r"(?<!\\)[{}$]")
+_ACCENTS = tuple(
+    (re.compile(r"\\" + re.escape(mark) + r"(?:{\\?([a-zA-Z])}|\\?([a-zA-Z]))"),
+     combining)
+    for mark, combining in (
+        ("'", "\u0301"), ("`", "\u0300"), ('"', "\u0308"),
+        ("^", "\u0302"), ("~", "\u0303"),
+    ))
+# Plain replacements, applied in order: symbols, dashes and ties, escapes.
+_SYMBOLS = {
+    r"\eta": "\u03b7",
+    r"\S": "\u00a7",
+    "---": "\u2014",
+    "--": "\u2013",
+    "~": "\u00a0",
+    "\\&": "&",
+    "\\_": "_",
+    "\\%": "%",
+}
+
+
 def _detex(s: str) -> str:
     """TeX title to plain text."""
     s = s.replace(r"\\", " ")
-    s = re.sub(r"\\(?:path|texttt|leanid|emph|textit|textbf|textsc)\s*{([^{}]*)}", r"\1", s)
-    s = re.sub(r"\\(?:text|mathrm|mathcal|mathbb)\s*{([^{}]*)}", r"\1", s)
-    accents = {"'": "\u0301", "`": "\u0300", '"': "\u0308", "^": "\u0302", "~": "\u0303"}
-    for mark, combining in accents.items():
-        s = re.sub(
-            r"\\" + re.escape(mark) + r"(?:{\\?([a-zA-Z])}|\\?([a-zA-Z]))",
+    s = _FONT_ARG_RE.sub(r"\1", s)
+    s = _MATH_FONT_ARG_RE.sub(lambda m: m.group(1) or m.group(2) or "", s)
+    for pattern, combining in _ACCENTS:
+        s = pattern.sub(
             lambda m, c=combining: (m.group(1) or m.group(2)) + c, s)
-    s = re.sub(r"\\(?:large|Large|small|footnotesize|normalsize)\b\s*", "", s)
-    s = re.sub(r"\\mathcal\s*", "", s)
-    s = s.replace(r"\eta", "\u03b7").replace(r"\S", "\u00a7")
-    s = s.replace("---", "\u2014").replace("--", "\u2013").replace("~", "\u00a0")
-    s = s.replace("\\&", "&").replace("\\_", "_").replace("\\%", "%")
-    s = re.sub(r"(?<!\\)[{}$]", "", s)
+    s = _SIZE_RE.sub("", s)
+    for tex, plain in _SYMBOLS.items():
+        s = s.replace(tex, plain)
+    s = _STRAY_BRACE_RE.sub("", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -191,31 +254,49 @@ def _bib_escape(s: str) -> str:
     return re.sub(r"([&%#_])", r"\\\1", s)
 
 
-def _git_date(cfg: Config, path: Path) -> str:
-    out = subprocess.run(
-        ["git", "log", "-1", "--format=%as", "--", str(path)],
-        cwd=cfg.root, capture_output=True, text=True,
-    ).stdout.strip()
-    return out or "n.d."
-
-
-@dataclass
 class Note:
-    slug: str
-    title: str = ""
-    date: str = ""
-    citations: int = 0
-    kind: str | None = None
-    status: str | None = None
+    """One parsed note.
+
+    ``kind`` and ``status`` hold the raw matched verdict-marker strings;
+    validity against :data:`KIND_SEVERITY` and :data:`STATUSES` is judged
+    where it matters (``check``), not at parse time.  The date is lazy:
+    a note without an explicit ``\\date`` resolves it from the git history
+    only when the date is actually read.
+    """
+
+    def __init__(self, slug: str, title: str = "", date: str = "",
+                 citations: int = 0, kind: str | None = None,
+                 status: str | None = None):
+        self.slug = slug
+        self.title = title
+        self.citations = citations
+        self.kind = kind
+        self.status = status
+        self._date = date
+        self._date_source = None
+
+    @property
+    def date(self) -> str:
+        if not self._date and self._date_source is not None:
+            self._date = self._date_source()
+        return self._date
+
+    @date.setter
+    def date(self, value: str) -> None:
+        self._date = value
 
     @property
     def severity(self) -> str | None:
-        return KIND_SEVERITY.get(self.kind or "")
+        return KIND_SEVERITY.get(self.kind)
 
     @property
     def live(self) -> bool:
         """A note that still names unresolved mathematical debt."""
         return self.status == "open"
+
+    @property
+    def settled(self) -> bool:
+        return self.status in SETTLED_STATUSES
 
     @property
     def year(self) -> str:
@@ -243,17 +324,13 @@ def parse_note(cfg: Config, path: Path) -> Note:
     raw_title = _braced_arg(tex, "title")
     note.title = _detex(raw_title) if raw_title else path.stem.replace("_", " ")
     raw_date = _braced_arg(tex, "date") or ""
-    note.date = (
-        _git_date(cfg, path) if "today" in raw_date or not raw_date
-        else raw_date.strip()
-    )
+    if raw_date and "today" not in raw_date:
+        note.date = raw_date.strip()
+    else:
+        note._date_source = lambda: cfg.git_date(path)
     m = GAPNOTE_RE.search(tex)
     if m:
-        kind, status = m.group(1), m.group(2)
-        if kind in KIND_SEVERITY:
-            note.kind = kind
-        if status in STATUSES:
-            note.status = status
+        note.kind, note.status = m.group(1), m.group(2)
     return note
 
 
@@ -270,20 +347,32 @@ def scan_references(cfg: Config) -> tuple[Counter, dict[str, set[str]]]:
     for root in roots:
         if not root.exists():
             continue
-        for f in sorted(root.rglob("*")):
-            if f.suffix not in {".lean", ".tex", ".md"} or f in seen or not f.is_file():
-                continue
-            seen.add(f)
-            try:
-                text = f.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            for slug in REF_RE.findall(text):
-                if f.stem == slug:
+        for pattern in ("*.lean", "*.tex", "*.md"):
+            for f in root.rglob(pattern):
+                if f in seen or not f.is_file():
                     continue
-                counts[slug] += 1
-                locations.setdefault(slug, set()).add(str(f.relative_to(cfg.root)))
+                seen.add(f)
+                try:
+                    text = f.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                for slug in REF_RE.findall(text):
+                    if f.stem == slug:
+                        continue
+                    counts[slug] += 1
+                    locations.setdefault(slug, set()).add(
+                        str(f.relative_to(cfg.root)))
     return counts, locations
+
+
+def _verdict_problem(note: Note) -> str | None:
+    """Why ``note``'s verdict marker fails, or ``None`` when it is valid."""
+    if note.kind is None:
+        return "lacks a \\gapnote{kind}{status} verdict marker"
+    if note.kind not in KIND_SEVERITY or note.status not in STATUSES:
+        return (f"carries a verdict marker with unrecognized kind/status "
+                f"\\gapnote{{{note.kind}}}{{{note.status}}}")
+    return None
 
 
 def check(cfg: Config) -> int:
@@ -297,9 +386,10 @@ def check(cfg: Config) -> int:
         print(f"::error::paper-gap note '{slug}.tex' is referenced "
               f"but does not exist ({where})")
         failures += 1
-    for p in sorted(cfg.gaps.glob("*.tex")):
-        if p.name in cfg.skip or p.name == cfg.policy:
-            continue
+
+    # One pass over the notes: naming, version-suffix, and verdict rules.
+    for p in cfg.note_paths():
+        note = parse_note(cfg, p)
         key = source_key(p.stem, cfg.sources)
         if key is None or len(p.stem) <= len(key) + 1:
             print(f"::error::paper-gap note '{p.name}' is not named "
@@ -307,31 +397,35 @@ def check(cfg: Config) -> int:
                   f"nonempty topic (see [paper_gaps.sources] in "
                   f"texra-blueprint.toml)")
             failures += 1
-        elif re.search(r"[_-]v\d+$", p.stem):
+        elif _VERSION_SUFFIX_RE.search(p.stem):
             print(f"::error::paper-gap note '{p.name}' carries a version "
                   f"suffix; notes are revised in place")
             failures += 1
+        problem = _verdict_problem(note)
+        if problem is not None:
+            if cfg.require_verdict:
+                print(f"::error::paper-gap note '{p.name}' {problem}")
+                failures += 1
+            else:
+                print(f"::warning::paper-gap note '{p.name}' {problem}")
+
+    # Configuration cross-references: alias targets must exist, and group
+    # aliases must relate registered source keys.
     for old, new in sorted(cfg.aliases.items()):
         if new not in existing:
             print(f"::error::legacy alias '{old}' points at '{new}.tex', "
                   f"which does not exist")
             failures += 1
-    untagged = []
-    for p in sorted(cfg.gaps.glob("*.tex")):
-        if p.name in cfg.skip or p.name == cfg.policy:
-            continue
-        note = parse_note(cfg, p)
-        if note.kind is None or note.status is None:
-            untagged.append(p.name)
-    if untagged:
-        msg = (f"{len(untagged)} notes lack a valid "
-               f"\\gapnote{{kind}}{{status}} verdict marker")
-        if cfg.require_verdict:
-            print(f"::error::{msg}: " + ", ".join(untagged[:5])
-                  + ("..." if len(untagged) > 5 else ""))
-            failures += len(untagged)
-        else:
-            print(f"::warning::{msg}")
+    for alias, target in sorted(cfg.group_aliases.items()):
+        if alias not in cfg.sources:
+            print(f"::error::group alias key '{alias}' is not a registered "
+                  f"source key (see [paper_gaps.sources])")
+            failures += 1
+        if target not in cfg.sources:
+            print(f"::error::group alias '{alias}' points at '{target}', "
+                  f"which is not a registered source key")
+            failures += 1
+
     if not failures:
         print(f"paper-gaps check: {len(counts)} referenced slugs resolve, "
               f"all note names carry registered source keys")
@@ -363,12 +457,9 @@ tr.settled td, tr.settled a { opacity:.55; }
 """
 
 
-_SEV_ORDER = {"high": 0, "medium": 1, "low": 2, None: 3}
-
-
 def _note_sort_key(n: Note):
     return (0 if n.live or n.status is None else 1,
-            _SEV_ORDER.get(n.severity, 3), n.slug)
+            _SEV_ORDER.get(n.severity, len(SEVERITIES)), n.slug)
 
 
 def _chips(n: Note) -> str:
@@ -381,12 +472,32 @@ def _chips(n: Note) -> str:
     return out
 
 
+def _group_table(cfg: Config, notes: dict[str, Note]) -> dict[str, tuple[str, list[Note]]]:
+    """Group key -> (heading text, member notes), built in one pass.
+
+    A slug is grouped under its registered source key (falling back to the
+    slug itself for an unregistered name, which ``check`` reports), folded
+    through ``group_aliases``; the heading lists the key with every alias
+    folded into it, then the registered source description.
+    """
+    reverse_aliases: dict[str, list[str]] = {}
+    for alias, target in cfg.group_aliases.items():
+        reverse_aliases.setdefault(target, []).append(alias)
+    groups: dict[str, tuple[str, list[Note]]] = {}
+    for n in notes.values():
+        key = source_key(n.slug, cfg.sources) or n.slug
+        key = cfg.group_aliases.get(key, key)
+        if key not in groups:
+            keys = ", ".join([key] + sorted(reverse_aliases.get(key, [])))
+            heading = (f"{keys} \u00b7 {cfg.sources[key]}"
+                       if key in cfg.sources else keys)
+            groups[key] = (heading, [])
+        groups[key][1].append(n)
+    return groups
+
+
 def build_site(cfg: Config, out: Path) -> None:
-    notes = {
-        p.stem: parse_note(cfg, p)
-        for p in sorted(cfg.gaps.glob("*.tex"))
-        if p.name not in cfg.skip and p.name != cfg.policy
-    }
+    notes = {p.stem: parse_note(cfg, p) for p in cfg.note_paths()}
     counts, _ = scan_references(cfg)
     for slug, n in notes.items():
         n.citations = counts[slug]
@@ -404,29 +515,24 @@ def build_site(cfg: Config, out: Path) -> None:
         src = cfg.gaps / f"{new}.pdf"
         if src.exists():
             shutil.copy2(src, out / f"{old}.pdf")
+            copied += 1
     (out / "paper-gaps.bib").write_text(
         "\n\n".join(notes[s].bibtex(cfg) for s in sorted(notes)) + "\n",
         encoding="utf-8")
 
-    groups: dict[str, list[Note]] = {}
-    for n in notes.values():
-        key = source_key(n.slug, cfg.sources) or n.slug.split("_", 1)[0]
-        groups.setdefault(cfg.group_aliases.get(key, key), []).append(n)
-    ordered = sorted(groups, key=lambda g: (-len(groups[g]), g))
+    groups = _group_table(cfg, notes)
+    ordered = sorted(groups, key=lambda g: (-len(groups[g][1]), g))
 
     rows = []
     for g in ordered:
-        members = sorted(groups[g], key=_note_sort_key)
-        keys = ", ".join(
-            [g] + sorted(k for k, v in cfg.group_aliases.items() if v == g))
-        heading = f"{keys} \u00b7 {cfg.sources[g]}" if g in cfg.sources else keys
+        heading, members = groups[g]
+        members = sorted(members, key=_note_sort_key)
         rows.append(f"<h2>{html.escape(heading)} <small>{len(members)}</small></h2>")
         rows.append("<table>")
         for n in members:
             cited = (f' <span class="n">\u00b7 cited \u00d7{n.citations}</span>'
                      if n.citations else "")
-            row_class = (' class="settled"'
-                         if n.status in ("resolved", "historical") else "")
+            row_class = ' class="settled"' if n.settled else ""
             rows.append(
                 f'<tr{row_class}><td class="date">{html.escape(n.date)}</td>'
                 f'<td><a href="{n.slug}.pdf">{html.escape(n.title)}</a>{_chips(n)}{cited} '
@@ -441,50 +547,47 @@ def build_site(cfg: Config, out: Path) -> None:
             f'<a href="{policy_stem}.pdf">policy note</a>. ')
     live = [n for n in notes.values() if n.live]
     high = [n for n in live if n.severity == "high"]
-    settled = [n for n in notes.values() if n.status in ("resolved", "historical")]
+    settled = [n for n in notes.values() if n.settled]
     untagged = [n for n in notes.values() if n.kind is None]
     summary = (f"{len(notes)} notes: {len(live)} open"
                + (f" ({len(high)} high-severity)" if high else "")
                + f", {len(settled)} resolved or historical"
                + (f", {len(untagged)} untagged" if untagged else "") + ".")
-    page = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(cfg.title)}</title>
-<style>{STYLE}</style>
-</head>
-<body>
-<h1>{html.escape(cfg.title)}</h1>
+    body = f"""<h1>{html.escape(cfg.title)}</h1>
 <p class="lede">Mathematical notes recording each discrepancy between a cited
 source and the <a href="../">formal development</a>: missing hypotheses,
 scalar corrections, scope restrictions, and replacement proof routes.
 {html.escape(summary)} Grouped by source. {policy_line}Cite a note by its
 permanent URL <code>{cfg.site_base}/paper-gaps/&lt;name&gt;.pdf</code> or via
 <a href="paper-gaps.bib">paper-gaps.bib</a>.</p>
-{''.join(rows)}
-</body>
-</html>
-"""
-    (out / "index.html").write_text(page, encoding="utf-8")
+{''.join(rows)}"""
+    (out / "index.html").write_text(html_page(cfg.title, STYLE, body),
+                                    encoding="utf-8")
     print(f"paper-gaps site: {len(notes)} notes, {copied} PDFs, "
           f"{sum(n.citations for n in notes.values())} citations resolved")
 
 
 def build_pdfs(cfg: Config) -> int:
     """Compile every note to PDF with latexmk (ex build-paper-gaps.sh)."""
-    failures = 0
-    for tex in sorted(cfg.gaps.glob("*.tex")):
-        if tex.name in cfg.skip:
-            continue
-        result = subprocess.run(
+    # include_policy: the policy note is compiled and published like a note.
+    texs = cfg.note_paths(include_policy=True)
+
+    def compile_one(tex: Path) -> int:
+        return subprocess.run(
             ["latexmk", "-pdf", "-interaction=nonstopmode", "-halt-on-error",
              tex.name],
-            cwd=cfg.gaps)
-        if result.returncode != 0:
+            cwd=cfg.gaps).returncode
+
+    # latexmk is subprocess-bound: run the notes in parallel.
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=os.cpu_count()) as pool:
+        returncodes = list(pool.map(compile_one, texs))
+    failures = 0
+    for tex, returncode in zip(texs, returncodes):
+        if returncode != 0:
             print(f"::error::latexmk failed for {tex.name}")
             failures += 1
-        subprocess.run(["latexmk", "-c", tex.name], cwd=cfg.gaps,
-                       capture_output=True)
+    if texs:
+        subprocess.run(["latexmk", "-c", *[tex.name for tex in texs]],
+                       cwd=cfg.gaps, capture_output=True)
     return 1 if failures else 0

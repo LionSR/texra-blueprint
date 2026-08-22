@@ -32,7 +32,6 @@ chapter to go into from anywhere.
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 import html as _html
 import re
@@ -41,29 +40,30 @@ from plastexdepgraph.Packages.depgraph import DepGraph
 from plasTeX.Logging import getLogger
 from plasTeX.PackageResource import PackagePreCleanupCB
 
+from texra_blueprint import config as _config
+from texra_blueprint.pages import html_page
+
 log = getLogger()
 
 
 def _load_graphs_config() -> dict:
     """The [blueprint.graphs] table of texra-blueprint.toml, searched upward."""
-    here = Path.cwd()
-    for candidate in [here, *here.parents]:
-        path = candidate / "texra-blueprint.toml"
-        if path.exists():
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-            return data.get("blueprint", {}).get("graphs", {})
-    return {}
+    root = _config.find_root()
+    if root is None:
+        return {}
+    return _config.load_table(root, "blueprint.graphs", required=False)
 
 
 def _induced(document, doc_graph: DepGraph, nodes: set, *,
-             boundary: bool) -> DepGraph:
+             boundary: bool, all_edges: set) -> DepGraph:
     """The subgraph of ``doc_graph`` induced by ``nodes``.
 
     With ``boundary``, the direct external dependencies of the set are
     included as context; ``to_dot`` then draws the crossing edges too.
+    ``all_edges`` is the union of the document's edges and proof edges,
+    computed once by the caller.
     """
     if boundary:
-        all_edges = doc_graph.edges | doc_graph.proof_edges
         nodes = nodes | {s for s, t in all_edges if t in nodes}
     graph = DepGraph()
     graph.document = document
@@ -89,8 +89,14 @@ class _SectionKey:
         self.ref = self._Ref(name)
 
 
-def _section_key(counter: str, name: str):
-    return _SectionKey(counter, name)
+def _graph_page(counter: str, name: str) -> tuple[_SectionKey, str]:
+    """The graphs-dict key and page URL for one added graph.
+
+    Upstream names the page it renders for a section key
+    ``dep_graph_{counter}_{name}.html``; stating that contract here keeps
+    the graph registration and the registry/toc entries on one definition.
+    """
+    return _SectionKey(counter, name), f"dep_graph_{counter}_{name}.html"
 
 
 def ProcessOptions(options, document):  # noqa: N802 (plasTeX hook name)
@@ -110,27 +116,37 @@ def ProcessOptions(options, document):  # noqa: N802 (plasTeX hook name)
             return
         toc = document.rendererdata["html5"].setdefault("extra_toc_items", [])
         boundary = bool(config.get("boundary", True))
+        all_edges = doc_graph.edges | doc_graph.proof_edges
         registry = document.userdata.setdefault("texra_graphs_registry", [])
         registry.append({"url": "dep_graph_document.html",
                          "label": "Full graph",
                          "count": len(doc_graph.nodes)})
 
         if config.get("by_chapter"):
-            for chapter in document.getElementsByTagName("chapter"):
-                nodes = {n for n in doc_graph.nodes
-                         if chapter in _ancestry(n)}
+            chapters = document.getElementsByTagName("chapter")
+            # One ancestry pass: walk each node's parent chain once and
+            # group it under the chapter it sits in.
+            chapter_set = set(chapters)
+            chapter_nodes: dict = {}
+            for n in doc_graph.nodes:
+                for ancestor in _ancestry(n):
+                    if ancestor in chapter_set:
+                        chapter_nodes.setdefault(ancestor, set()).add(n)
+                        break
+            for chapter in chapters:
+                nodes = chapter_nodes.get(chapter)
                 if not nodes:
                     continue
                 number = chapter.ref.textContent if chapter.ref else "0"
                 title = getattr(chapter, "title", None)
                 title_text = (title.textContent.strip()
                               if title is not None else "")
-                key = _section_key("chapter", number)
+                key, url = _graph_page("chapter", number)
                 graph = _induced(document, doc_graph, nodes,
-                                 boundary=boundary)
+                                 boundary=boundary, all_edges=all_edges)
                 graphs[key] = graph
                 registry.append({
-                    "url": f"dep_graph_chapter_{number}.html",
+                    "url": url,
                     "label": (f"Chapter {number} · {title_text}"
                               if title_text else f"Chapter {number}"),
                     "count": len(graph.nodes)})
@@ -154,12 +170,13 @@ def ProcessOptions(options, document):  # noqa: N802 (plasTeX hook name)
                     nodes.add(node)
             if not nodes:
                 continue
-            key = _section_key("subset", name)
+            key, url = _graph_page("subset", name)
             graph = _induced(document, doc_graph, nodes,
-                             boundary=bool(spec.get("boundary", False)))
+                             boundary=bool(spec.get("boundary", False)),
+                             all_edges=all_edges)
             graphs[key] = graph
             registry.append({
-                "url": f"dep_graph_subset_{name}.html",
+                "url": url,
                 "label": spec.get("title", f"{name} graph"),
                 "count": len(graph.nodes)})
 
@@ -176,11 +193,15 @@ def ProcessOptions(options, document):  # noqa: N802 (plasTeX hook name)
     document.addPackageResource([cb])
 
 
-_SELECT_CSS = (
+_SELECT_HTML = (
     '<div style="position:fixed;top:0;left:0;right:0;z-index:20;'
     'background:#f5f5f5;border-bottom:1px solid #ccc;padding:.35rem .8rem;'
     'font:14px sans-serif">Graph:&nbsp;<select style="max-width:70%" '
     'onchange="if(this.value)location=this.value">{options}</select></div>')
+
+_CHOOSER_STYLE = (
+    "body{font:16px/1.6 sans-serif;max-width:40rem;margin:2rem auto;"
+    "padding:0 1rem}small{color:#777}li{margin:.2rem 0}")
 
 
 def _write_navigation(document):
@@ -192,13 +213,8 @@ def _write_navigation(document):
     rows = "\n".join(
         f'<li><a href="{g["url"]}">{_html.escape(g["label"])}</a> '
         f'<small>({g["count"]} nodes)</small></li>' for g in registry)
-    chooser = (
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        "<title>Dependency graphs</title>"
-        "<style>body{font:16px/1.6 sans-serif;max-width:40rem;margin:2rem auto;"
-        "padding:0 1rem}small{color:#777}li{margin:.2rem 0}</style></head>"
-        f"<body><h1>Dependency graphs</h1><ul>{rows}</ul></body></html>\n")
+    chooser = html_page("Dependency graphs", _CHOOSER_STYLE,
+                        f"<h1>Dependency graphs</h1><ul>{rows}</ul>")
     Path("dep_graphs.html").write_text(chooser, encoding="utf-8")
 
     # The selector, injected into each rendered graph page.
@@ -213,7 +229,7 @@ def _write_navigation(document):
             + f'>{_html.escape(h["label"])}</option>' for h in registry)
         text = page.read_text(encoding="utf-8")
         text, n = re.subn(r"(<body[^>]*>)",
-                          r"\1" + _SELECT_CSS.format(options=options),
+                          r"\1" + _SELECT_HTML.format(options=options),
                           text, count=1)
         if n:
             page.write_text(text, encoding="utf-8")

@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--root", type=Path, default=Path.cwd(),
         help="repository root holding texra-blueprint.toml (default: cwd)")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(required=True)
 
     pg = sub.add_parser("paper-gaps", help="paper-gap note machinery")
     pg_sub = pg.add_subparsers(dest="pg_command", required=True)
@@ -35,9 +35,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.pg_command == "check":
         return papergaps.check(cfg)
-    if args.pg_command == "build":
-        return papergaps.build_pdfs(cfg)
-    return 2
+    return papergaps.build_pdfs(cfg)
 
 
 if __name__ == "__main__":

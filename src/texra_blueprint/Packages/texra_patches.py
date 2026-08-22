@@ -48,6 +48,7 @@ from __future__ import annotations
 import io
 import os
 import pickle
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -237,29 +238,56 @@ _blueprint.lean.digest = _patched_lean_digest
 # --- plastexdepgraph patch ------------------------------------------------
 
 
-def _normalize_label(obj: Any) -> str:
-    return _stringify_tex_item(obj)
+_normalize_label = _stringify_tex_item
 
 
-
-def _find_label_node(node, label: str):
+def _node_label_keys(node):
+    """The values under which ``node`` may be addressed as a label target."""
     node_id = getattr(node, "id", None)
-    if node_id == label:
-        return node
-
+    if node_id is not None:
+        yield node_id
     attrs = getattr(node, "attributes", None)
     if attrs:
         for key in ("id", "label"):
-            if attrs.get(key) == label:
-                return node
+            value = attrs.get(key)
+            if value is not None:
+                yield value
 
-    for child in getattr(node, "childNodes", []):
-        found = _find_label_node(child, label)
-        if found is not None:
-            return found
 
-    return None
+def _node_matches(node, label: str, *, normalize: bool = False) -> bool:
+    """Whether ``node`` carries ``label`` as its id or label attribute."""
+    return any(
+        (_normalize_label(key) if normalize else key) == label
+        for key in _node_label_keys(node)
+    )
 
+
+def _label_node_index(doc) -> dict:
+    """Exact label/id -> node, built lazily in one pre-order DOM pass.
+
+    ``setdefault`` keeps the first node met in pre-order, matching what
+    the per-call recursive search used to return.
+    """
+    index = doc.userdata.get("_texra_label_node_index")
+    if index is None:
+        index = {}
+        stack = [doc]
+        while stack:
+            node = stack.pop()
+            for key in _node_label_keys(node):
+                # Only string keys: the recursive search compared with a
+                # string label, so a non-string value never matched.
+                if isinstance(key, str):
+                    index.setdefault(key, node)
+            children = getattr(node, "childNodes", None)
+            if children:
+                stack.extend(reversed(list(children)))
+        doc.userdata["_texra_label_node_index"] = index
+    return index
+
+
+def _find_label_node(doc, label: str):
+    return _label_node_index(doc).get(label)
 
 
 def _lookup_label(labels_dict, label: str):
@@ -268,19 +296,9 @@ def _lookup_label(labels_dict, label: str):
         return target
 
     for raw_key, candidate in labels_dict.items():
-        if _normalize_label(raw_key) == label:
+        if (_normalize_label(raw_key) == label
+                or _node_matches(candidate, label, normalize=True)):
             return candidate
-
-        candidate_id = getattr(candidate, "id", None)
-        if candidate_id is not None and _normalize_label(candidate_id) == label:
-            return candidate
-
-        attrs = getattr(candidate, "attributes", None)
-        if attrs:
-            for key in ("id", "label"):
-                value = attrs.get(key)
-                if value is not None and _normalize_label(value) == label:
-                    return candidate
 
     return None
 
@@ -368,44 +386,51 @@ def _load_paux_labels(doc):
 
 
 
+_LABEL_OCCURRENCE = re.compile(r"\\label\{([^{}]*)\}")
+
+
+def _label_status_index(doc) -> dict:
+    """label -> ``{leanok, notready}`` from one pass over the sources.
+
+    Every ``.tex`` file under the working directory is read once, and each
+    ``\label`` occurrence contributes the status of the surrounding chunk
+    (its enclosing environment, else a 400/800-character window, the same
+    rule the per-label scan applied).  ``setdefault`` keeps the first
+    occurrence, matching what the per-label scan used to find.
+    """
+    index = doc.userdata.get("_texra_label_status")
+    if index is None:
+        index = {}
+        working_dir = Path(doc.userdata.get("working-dir", "."))
+        for tex_path in working_dir.rglob("*.tex"):
+            try:
+                # plasTeX sources are UTF-8 by convention; pinning the encoding
+                # keeps this scan stable across locales and avoids silently
+                # disabling \leanok / \notready detection on systems with a
+                # non-UTF-8 default encoding.
+                text = tex_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for occurrence in _LABEL_OCCURRENCE.finditer(text):
+                idx = occurrence.start()
+                begin = text.rfind(r"\begin{", 0, idx)
+                end = text.find(r"\end{", idx)
+                if begin == -1:
+                    begin = max(0, idx - 400)
+                if end == -1:
+                    end = min(len(text), idx + 800)
+                chunk = text[begin:end]
+                index.setdefault(occurrence.group(1), {
+                    "leanok": r"\leanok" in chunk,
+                    "notready": r"\notready" in chunk,
+                })
+        doc.userdata["_texra_label_status"] = index
+    return index
+
+
 def _label_status_from_source(doc, label: str):
-    cache = doc.userdata.setdefault("_texra_label_status", {})
-    if label in cache:
-        return cache[label]
-
-    working_dir = Path(doc.userdata.get("working-dir", "."))
-    needle = rf"\label{{{label}}}"
-    status = {"leanok": False, "notready": False}
-
-    for tex_path in working_dir.rglob("*.tex"):
-        try:
-            # plasTeX sources are UTF-8 by convention; pinning the encoding
-            # keeps this scan stable across locales and avoids silently
-            # disabling \leanok / \notready detection on systems with a
-            # non-UTF-8 default encoding.
-            text = tex_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-
-        idx = text.find(needle)
-        if idx == -1:
-            continue
-
-        begin = text.rfind(r"\begin{", 0, idx)
-        end = text.find(r"\end{", idx)
-        if begin == -1:
-            begin = max(0, idx - 400)
-        if end == -1:
-            end = min(len(text), idx + 800)
-        chunk = text[begin:end]
-        status = {
-            "leanok": r"\leanok" in chunk,
-            "notready": r"\notready" in chunk,
-        }
-        break
-
-    cache[label] = status
-    return status
+    return _label_status_index(doc).get(
+        label, {"leanok": False, "notready": False})
 
 
 
@@ -426,8 +451,23 @@ def _proxy_from_paux(doc, label: str):
 
 
 
+def _report_missing_label_once(doc, label: str) -> None:
+    logged = doc.userdata.setdefault("_texra_missing_labels_logged", set())
+    if label not in logged:
+        _depgraph.log.error("Label %r could not be resolved", label)
+        logged.add(label)
+
+
 def _resolve_label(doc, label: str, *, report_missing: bool = False):
     if not label:
+        return None
+
+    # Negative cache: a label known to be missing is not searched again,
+    # and its error is logged once.
+    missing = doc.userdata.setdefault("_texra_missing_labels", set())
+    if label in missing:
+        if report_missing:
+            _report_missing_label_once(doc, label)
         return None
 
     labels_dict = doc.context.labels
@@ -440,21 +480,34 @@ def _resolve_label(doc, label: str, *, report_missing: bool = False):
         target = _proxy_from_paux(doc, label)
         if target is not None:
             labels_dict[label] = target
-    if target is None and report_missing:
-        _depgraph.log.error("Label %r could not be resolved", label)
+    if target is None:
+        missing.add(label)
+        if report_missing:
+            _report_missing_label_once(doc, label)
     return target
 
 
 
-def _patched_uses_digest(self, tokens):
+def _digest_label_list(self, tokens):
+    """The shared digest prologue: (parent node, document, label list)."""
     Command.digest(self, tokens)
-    node = self.parentNode
-    doc = self.ownerDocument
     labels = [
         label
-        for label in (_normalize_label(label) for label in self.attributes.get("labels", []))
+        for label in (_normalize_label(item) for item in self.attributes.get("labels", []))
         if label
     ]
+    return self.parentNode, self.ownerDocument, labels
+
+
+def _digest_label(self, tokens):
+    """The single-label digest prologue: (parent node, document, label)."""
+    Command.digest(self, tokens)
+    return (self.parentNode, self.ownerDocument,
+            _normalize_label(self.attributes.get("label", "")))
+
+
+def _patched_uses_digest(self, tokens):
+    node, doc, labels = _digest_label_list(self, tokens)
 
     def update_used() -> None:
         used = []
@@ -469,14 +522,7 @@ def _patched_uses_digest(self, tokens):
 
 
 def _patched_also_in_digest(self, tokens):
-    Command.digest(self, tokens)
-    node = self.parentNode
-    doc = self.ownerDocument
-    labels = [
-        label
-        for label in (_normalize_label(label) for label in self.attributes.get("labels", []))
-        if label
-    ]
+    node, doc, labels = _digest_label_list(self, tokens)
 
     def update_incls() -> None:
         also_in = []
@@ -493,10 +539,7 @@ def _patched_also_in_digest(self, tokens):
 
 
 def _patched_proves_digest(self, tokens):
-    Command.digest(self, tokens)
-    node = self.parentNode
-    doc = self.ownerDocument
-    label = _normalize_label(self.attributes.get("label", ""))
+    node, doc, label = _digest_label(self, tokens)
 
     def update_proved() -> None:
         proved = _resolve_label(doc, label, report_missing=True)

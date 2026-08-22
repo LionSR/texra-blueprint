@@ -41,14 +41,22 @@ _NAMED_LENGTHS = (
     "extrarowheight",
 )
 
+# The spelling of a decimal number, and the optional sign and numeric factor
+# that may precede a length.  The number's groups are capturing so downstream
+# group numbers stay put: ``CONTROL_WORD.match(...).group(4)`` is the control
+# word's name.
+_NUMBER = r"(\d+(\.\d*)?|\.\d+)"
+_SIGN = r"\s*[-+]?\s*"
+_FACTOR = r"(" + _NUMBER + r"\s*)?"
+
 # What may stand in brackets after a row break and mean the gap to the next
 # row: a number with a unit, or one of the named lengths with an optional
 # factor in front of it.  Anything else there is mathematics, and reading it
 # as a gap turns the row into an error box.
 ROW_BREAK_LENGTH = re.compile(
-    r"""\s*[-+]?\s*(
-          (\d+(\.\d*)?|\.\d+)\s*(pt|pc|in|bp|cm|mm|dd|cc|sp|ex|em|mu)
-        | ((\d+(\.\d*)?|\.\d+)\s*)?\\(""" + "|".join(_NAMED_LENGTHS) + r""")
+    _SIGN + r"""(
+          """ + _NUMBER + r"""\s*(pt|pc|in|bp|cm|mm|dd|cc|sp|ex|em|mu)
+        | """ + _FACTOR + r"""\\(""" + "|".join(_NAMED_LENGTHS) + r""")
         )\s*$""",
     re.VERBOSE,
 )
@@ -57,7 +65,7 @@ ROW_BREAK_LENGTH = re.compile(
 # a lone control word is left to the renderer, which asks the document what
 # the name means.  Everything with structure in it -- a subscript, a comma, a
 # pair of parentheses, a second symbol -- is mathematics either way.
-CONTROL_WORD = re.compile(r"\s*[-+]?\s*((\d+(\.\d*)?|\.\d+)\s*)?\\([A-Za-z@]+)\s*$")
+CONTROL_WORD = re.compile(_SIGN + _FACTOR + r"\\([A-Za-z@]+)\s*$")
 
 # Arithmetic on dimensions has its own primitives, and they appear nowhere
 # else, so a gap computed rather than written is recognised by them.
