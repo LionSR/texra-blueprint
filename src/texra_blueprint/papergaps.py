@@ -3,8 +3,9 @@
 A paper-gap note records a mathematical discrepancy between a cited source
 and the formal development.  This module builds the published index of a
 project's notes and enforces two invariants in CI: every repository
-reference to a note resolves to an existing file, and every note's name
-starts with a registered source key.
+reference to a note resolves to an existing file (directly or through a
+legacy alias), and every note's name is a registered source key followed
+by a separator and a topic.
 
 Configuration lives in ``texra-blueprint.toml`` at the repository root::
 
@@ -15,7 +16,7 @@ Configuration lives in ``texra-blueprint.toml`` at the repository root::
     bib_author = "The {MyProject} contributors"
     institution = "MyProject"
     title      = "MyProject paper-gap notes"
-    scan_roots = ["MyProject", "blueprint/src"]   # where citations live
+    scan_roots = ["MyProject", "blueprint/src", "blueprint/comments", "docs"]
     skip       = ["command.tex", "template.tex"]  # machinery, not notes
 
     [paper_gaps.sources]           # the source-key registry
@@ -23,15 +24,37 @@ Configuration lives in ``texra-blueprint.toml`` at the repository root::
     wolf   = "Wolf, Quantum Channels & Operations (2012 lecture notes)"
     self   = "internal theorem-surface audit, no single external source"
 
+    [paper_gaps.group_aliases]     # fold a key into another key's index group
+    cpgsv21 = "rmp"                # both keys stay registered and accepted
+
+    [paper_gaps.aliases]           # slugs published before the registry
+    old_deviation_note = "cpsv16_deviation_note"
+
+``scan_roots`` lists the committed subtrees whose ``*.lean``, ``*.tex``,
+and ``*.md`` files are scanned for note references; name built subtrees
+individually (``blueprint/src``, ``blueprint/comments``) so local build
+output under ``blueprint/web`` or ``blueprint/print`` stays out.  Each
+``[paper_gaps.aliases]`` entry maps a slug published before the source-key
+registry to the note that holds its content today: ``site`` serves the old
+PDF URL as a copy of the target note, and ``check`` accepts references to
+the old name while verifying that the target exists.  Keys listed in
+``[paper_gaps.group_aliases]`` share their target key's heading on the
+index page — one heading per source when two registered keys cite the
+same source.
+
 Subcommands (via ``texra-blueprint paper-gaps``): ``site OUT_DIR`` builds
 the grouped index, copies the note PDFs, and writes ``paper-gaps.bib``;
 ``build`` compiles the notes to PDF with latexmk; ``check`` fails when a
-referenced note is missing or a note's name lacks a registered source key,
-the way ``leanblueprint checkdecls`` fails on an unresolved declaration.
+referenced note is missing, when a note's name is not a registered source
+key followed by a separator and a nonempty topic, when a note name carries
+a version suffix (``_v2``/``-v2`` — notes are revised in place), or when a
+legacy alias points at a note that does not exist, the way ``leanblueprint
+checkdecls`` fails on an unresolved declaration.
 """
 
 from __future__ import annotations
 
+import datetime
 import html
 import re
 import shutil
@@ -77,6 +100,8 @@ class Config:
     skip: set[str]
     policy: str
     sources: dict[str, str]
+    aliases: dict[str, str]
+    group_aliases: dict[str, str]
 
     @classmethod
     def load(cls, root: Path) -> "Config":
@@ -101,6 +126,8 @@ class Config:
             | {"references.bib"},
             policy=c.get("policy", "policy.tex"),
             sources=dict(c.get("sources", {})),
+            aliases=dict(c.get("aliases", {})),
+            group_aliases=dict(c.get("group_aliases", {})),
         )
 
 
@@ -143,6 +170,11 @@ def _braced_arg(tex: str, command: str) -> str | None:
     return None
 
 
+def _bib_escape(s: str) -> str:
+    """Escape TeX-special characters for a printable BibTeX field."""
+    return re.sub(r"([&%#_])", r"\\\1", s)
+
+
 def _git_date(cfg: Config, path: Path) -> str:
     out = subprocess.run(
         ["git", "log", "-1", "--format=%as", "--", str(path)],
@@ -161,17 +193,17 @@ class Note:
     @property
     def year(self) -> str:
         m = re.match(r"(\d{4})", self.date)
-        return m.group(1) if m else "n.d."
+        return m.group(1) if m else str(datetime.date.today().year)
 
     def bibtex(self, cfg: Config) -> str:
-        title = self.title.replace("\u2013", "--").replace("\u2014", "---")
+        title = _bib_escape(self.title.replace("\u2013", "--").replace("\u2014", "---"))
         return (
             f"@techreport{{gap:{self.slug},\n"
             f"  author      = {{{cfg.bib_author}}},\n"
             f"  title       = {{{title}}},\n"
             f"  institution = {{{cfg.institution}}},\n"
             f"  type        = {{Paper-gap note}},\n"
-            f"  number      = {{{self.slug}}},\n"
+            f"  number      = {{{_bib_escape(self.slug)}}},\n"
             f"  year        = {{{self.year}}},\n"
             f"  url         = {{{cfg.site_base}/paper-gaps/{self.slug}.pdf}},\n"
             f"}}"
@@ -223,8 +255,10 @@ def scan_references(cfg: Config) -> tuple[Counter, dict[str, set[str]]]:
 def check(cfg: Config) -> int:
     counts, locations = scan_references(cfg)
     existing = {p.stem for p in cfg.gaps.glob("*.tex")}
+    # A reference to a legacy alias resolves through its target note.
+    resolved = existing | {o for o, n in cfg.aliases.items() if n in existing}
     failures = 0
-    for slug in sorted(set(counts) - existing):
+    for slug in sorted(set(counts) - resolved):
         where = ", ".join(sorted(locations.get(slug, []))[:3])
         print(f"::error::paper-gap note '{slug}.tex' is referenced "
               f"but does not exist ({where})")
@@ -232,10 +266,21 @@ def check(cfg: Config) -> int:
     for p in sorted(cfg.gaps.glob("*.tex")):
         if p.name in cfg.skip or p.name == cfg.policy:
             continue
-        if source_key(p.stem, cfg.sources) is None:
-            print(f"::error::paper-gap note '{p.name}' does not start with a "
-                  f"registered source key (see [paper_gaps.sources] in "
+        key = source_key(p.stem, cfg.sources)
+        if key is None or len(p.stem) <= len(key) + 1:
+            print(f"::error::paper-gap note '{p.name}' is not named "
+                  f"<key>_<topic>.tex with a registered source key and a "
+                  f"nonempty topic (see [paper_gaps.sources] in "
                   f"texra-blueprint.toml)")
+            failures += 1
+        elif re.search(r"[_-]v\d+$", p.stem):
+            print(f"::error::paper-gap note '{p.name}' carries a version "
+                  f"suffix; notes are revised in place")
+            failures += 1
+    for old, new in sorted(cfg.aliases.items()):
+        if new not in existing:
+            print(f"::error::legacy alias '{old}' points at '{new}.tex', "
+                  f"which does not exist")
             failures += 1
     if not failures:
         print(f"paper-gaps check: {len(counts)} referenced slugs resolve, "
@@ -280,6 +325,12 @@ def build_site(cfg: Config, out: Path) -> None:
         if pdf.stem in notes or pdf.stem == policy_stem:
             shutil.copy2(pdf, out / pdf.name)
             copied += 1
+    # Old published URLs keep resolving: serve each pre-registry slug as a
+    # copy of the note that holds its content today.
+    for old, new in cfg.aliases.items():
+        src = cfg.gaps / f"{new}.pdf"
+        if src.exists():
+            shutil.copy2(src, out / f"{old}.pdf")
     (out / "paper-gaps.bib").write_text(
         "\n\n".join(notes[s].bibtex(cfg) for s in sorted(notes)) + "\n",
         encoding="utf-8")
@@ -287,22 +338,15 @@ def build_site(cfg: Config, out: Path) -> None:
     groups: dict[str, list[Note]] = {}
     for n in notes.values():
         key = source_key(n.slug, cfg.sources) or n.slug.split("_", 1)[0]
-        groups.setdefault(key, []).append(n)
-    for g in [g for g, ms in groups.items() if len(ms) == 1]:
-        groups.setdefault("misc", []).extend(groups.pop(g))
-    ordered = sorted((g for g in groups if g != "misc"),
-                     key=lambda g: (-len(groups[g]), g))
-    if "misc" in groups:
-        ordered.append("misc")
+        groups.setdefault(cfg.group_aliases.get(key, key), []).append(n)
+    ordered = sorted(groups, key=lambda g: (-len(groups[g]), g))
 
     rows = []
     for g in ordered:
         members = sorted(groups[g], key=lambda n: n.slug)
-        heading = (
-            "Miscellaneous" if g == "misc"
-            else f"{g} \u00b7 {cfg.sources[g]}" if g in cfg.sources
-            else g
-        )
+        keys = ", ".join(
+            [g] + sorted(k for k, v in cfg.group_aliases.items() if v == g))
+        heading = f"{keys} \u00b7 {cfg.sources[g]}" if g in cfg.sources else keys
         rows.append(f"<h2>{html.escape(heading)} <small>{len(members)}</small></h2>")
         rows.append("<table>")
         for n in members:

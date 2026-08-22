@@ -55,3 +55,127 @@ def test_source_key_separator_agnostic():
     assert source_key("cpsv16_ft_gap", sources) == "cpsv16"
     assert source_key("truncation-combinatorics-f-nonneg", sources) == "truncation-combinatorics"
     assert source_key("unregistered_note", sources) is None
+
+
+# --------------------------------------------------------------------------
+# Review-hardening behaviors ported from TNLean #6879 (commit 3fdec4404)
+
+
+def _copy_fixture(tmp_path):
+    import shutil
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE, root)
+    return root
+
+
+def _append_toml(root, text):
+    toml = root / "texra-blueprint.toml"
+    toml.write_text(toml.read_text() + text)
+
+
+def test_bibtex_escapes_tex_specials(tmp_path):
+    root = _copy_fixture(tmp_path)
+    note = root / "docs" / "paper-gaps" / "demo_rank_bounds.tex"
+    note.write_text(
+        "\\title{Trace \\& #4 of 5\\% rank\\_bounds}\n\\date{2026-08-22}\n")
+    cfg = Config.load(root)
+    entry = parse_note(cfg, note).bibtex(cfg)
+    assert "title       = {Trace \\& \\#4 of 5\\% rank\\_bounds}" in entry
+    assert "number      = {demo\\_rank\\_bounds}" in entry
+    # URLs stay unescaped so the link keeps resolving.
+    assert "url         = {https://example.github.io/fixture/paper-gaps/demo_rank_bounds.pdf}" in entry
+
+
+def test_year_falls_back_to_build_date():
+    import datetime
+    from texra_blueprint.papergaps import Note
+    assert Note(slug="x", date="n.d.").year == str(datetime.date.today().year)
+    assert Note(slug="x", date="2024-01-05").year == "2024"
+
+
+def test_site_serves_legacy_alias_pdfs(tmp_path):
+    root = _copy_fixture(tmp_path)
+    _append_toml(root, '\n[paper_gaps.aliases]\nold_local_fix = "demo_local_fix"\n')
+    (root / "docs" / "paper-gaps" / "demo_local_fix.pdf").write_bytes(b"%PDF-fake")
+    build_site(Config.load(root), tmp_path / "out")
+    assert (tmp_path / "out" / "old_local_fix.pdf").read_bytes() == b"%PDF-fake"
+
+
+def test_check_accepts_alias_references(tmp_path, capsys):
+    root = _copy_fixture(tmp_path)
+    _append_toml(root, '\n[paper_gaps.aliases]\nold_local_fix = "demo_local_fix"\n')
+    tex = root / "blueprint" / "src" / "web.tex"
+    tex.write_text(tex.read_text() + "\n% docs/paper-gaps/old_local_fix.tex\n")
+    assert check(Config.load(root)) == 0
+    assert "referenced slugs resolve" in capsys.readouterr().out
+
+
+def test_check_fails_on_dangling_alias_target(tmp_path, capsys):
+    root = _copy_fixture(tmp_path)
+    _append_toml(root, '\n[paper_gaps.aliases]\nold_gone = "demo_never_written"\n')
+    assert check(Config.load(root)) == 1
+    out = capsys.readouterr().out
+    assert "legacy alias 'old_gone' points at 'demo_never_written.tex'" in out
+
+
+def test_scan_covers_markdown_docs(tmp_path):
+    from texra_blueprint.papergaps import scan_references
+    root = _copy_fixture(tmp_path)
+    toml = root / "texra-blueprint.toml"
+    toml.write_text(toml.read_text().replace(
+        'scan_roots = ["blueprint/src"]',
+        'scan_roots = ["blueprint/src", "docs"]'))
+    (root / "docs" / "ledger.md").write_text(
+        "The deviation is recorded in docs/paper-gaps/demo_local_fix.tex.\n")
+    counts, locations = scan_references(Config.load(root))
+    assert counts["demo_local_fix"] == 1
+    assert locations["demo_local_fix"] == {"docs/ledger.md"}
+    assert check(Config.load(root)) == 0
+
+
+def test_singleton_group_keeps_registry_heading(tmp_path):
+    root = _copy_fixture(tmp_path)
+    (root / "docs" / "paper-gaps" / "self_audit_surface.tex").write_text(
+        "\\title{An Audit Surface}\n\\date{2026-08-22}\n")
+    build_site(Config.load(root), tmp_path / "out")
+    index = (tmp_path / "out" / "index.html").read_text()
+    assert "self · internal theorem-surface audit" in index
+    assert "Miscellaneous" not in index
+
+
+def test_group_alias_merges_headings(tmp_path):
+    root = _copy_fixture(tmp_path)
+    _append_toml(root, '''
+[paper_gaps.group_aliases]
+demo2 = "demo"
+''')
+    toml = root / "texra-blueprint.toml"
+    toml.write_text(toml.read_text().replace(
+        '[paper_gaps.sources]\ndemo = "arXiv:0000.00000 (a model source)"',
+        '[paper_gaps.sources]\ndemo = "arXiv:0000.00000 (a model source)"\n'
+        'demo2 = "arXiv:0000.00000 (a model source)"'))
+    (root / "docs" / "paper-gaps" / "demo2_extra_gap.tex").write_text(
+        "\\title{An Extra Gap}\n\\date{2026-08-22}\n")
+    build_site(Config.load(root), tmp_path / "out")
+    index = (tmp_path / "out" / "index.html").read_text()
+    assert "demo, demo2 · arXiv:0000.00000 (a model source)" in index
+    assert "<h2>demo2" not in index
+    assert "An Extra Gap" in index
+    assert check(Config.load(root)) == 0
+
+
+def test_check_rejects_bare_key_name(tmp_path, capsys):
+    root = _copy_fixture(tmp_path)
+    (root / "docs" / "paper-gaps" / "demo.tex").write_text("\\title{Bare}\n")
+    assert check(Config.load(root)) == 1
+    assert "nonempty topic" in capsys.readouterr().out
+
+
+def test_check_rejects_version_suffix(tmp_path, capsys):
+    root = _copy_fixture(tmp_path)
+    gaps = root / "docs" / "paper-gaps"
+    (gaps / "demo_extra_note_v2.tex").write_text("\\title{V2}\n")
+    (gaps / "demo_other-v3.tex").write_text("\\title{V3}\n")
+    assert check(Config.load(root)) == 1
+    out = capsys.readouterr().out
+    assert out.count("carries a version suffix") == 2
