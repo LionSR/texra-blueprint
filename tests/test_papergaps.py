@@ -1,4 +1,8 @@
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from texra_blueprint.papergaps import Config, build_site, check, parse_note
 
@@ -84,6 +88,46 @@ def test_bibtex_escapes_tex_specials(tmp_path):
     assert "number      = {demo\\_rank\\_bounds}" in entry
     # URLs stay unescaped so the link keeps resolving.
     assert "url         = {https://example.github.io/fixture/paper-gaps/demo_rank_bounds.pdf}" in entry
+
+
+def _build_unicode_note_site(tmp_path):
+    """A fixture copy with a Greek-and-accents note, site built into out/."""
+    root = _copy_fixture(tmp_path)
+    note = root / "docs" / "paper-gaps" / "demo_eta_threshold.tex"
+    note.write_text(
+        "\\title{Top index of $T_\\eta$ \\`a la Schr\\\"odinger, \\S3}\n"
+        "\\date{2026-08-22}\n")
+    out = tmp_path / "out"
+    build_site(Config.load(root), out)
+    return out
+
+
+def test_bib_unicode_folds_back_to_tex(tmp_path):
+    # Regression for issue #1: _detex expands \eta, \S, and accent commands
+    # to raw Unicode, which must not reach the emitted .bib fields.
+    out = _build_unicode_note_site(tmp_path)
+    bib = (out / "paper-gaps.bib").read_text()
+    assert bib.isascii(), "generated .bib contains raw non-ASCII"
+    assert "T\\_{\\ensuremath{\\eta}}" in bib
+    assert "{\\`{a}}" in bib
+    assert '{\\"{o}}' in bib
+    assert "{\\S}3" in bib
+
+
+def test_bib_roundtrips_through_classic_bibtex(tmp_path):
+    if shutil.which("bibtex") is None:
+        pytest.skip("bibtex not installed; ASCII-safety still covered by "
+                    "test_bib_unicode_folds_back_to_tex")
+    out = _build_unicode_note_site(tmp_path)
+    (out / "cite.aux").write_text(
+        "\\citation{gap:demo_eta_threshold}\n"
+        "\\bibstyle{alpha}\n"
+        "\\bibdata{paper-gaps}\n")
+    proc = subprocess.run(
+        ["bibtex", "cite"], cwd=out, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    bbl = (out / "cite.bbl").read_text()
+    assert "\\ensuremath{\\eta}" in bbl
 
 
 def test_year_falls_back_to_build_date():

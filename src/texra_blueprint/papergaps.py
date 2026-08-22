@@ -62,6 +62,7 @@ import os
 import re
 import shutil
 import subprocess
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -254,9 +255,79 @@ def _braced_arg(tex: str, command: str) -> str | None:
     return None
 
 
+# Unicode that ``_detex`` (or a note title itself) may carry, mapped back to
+# brace-protected TeX so the generated ``.bib`` stays pure ASCII and classic
+# ``bibtex`` (alpha.bst and friends) digests it.  Math-mode symbols are
+# wrapped in ``{\ensuremath{...}}``; text-mode symbols in plain braces.
+_UNICODE_TO_TEX = {
+    # Greek lowercase
+    "α": r"{\ensuremath{\alpha}}", "β": r"{\ensuremath{\beta}}",
+    "γ": r"{\ensuremath{\gamma}}", "δ": r"{\ensuremath{\delta}}",
+    "ε": r"{\ensuremath{\varepsilon}}", "ζ": r"{\ensuremath{\zeta}}",
+    "η": r"{\ensuremath{\eta}}", "θ": r"{\ensuremath{\theta}}",
+    "ι": r"{\ensuremath{\iota}}", "κ": r"{\ensuremath{\kappa}}",
+    "λ": r"{\ensuremath{\lambda}}", "μ": r"{\ensuremath{\mu}}",
+    "ν": r"{\ensuremath{\nu}}", "ξ": r"{\ensuremath{\xi}}",
+    "ο": "o", "π": r"{\ensuremath{\pi}}",
+    "ρ": r"{\ensuremath{\rho}}", "ς": r"{\ensuremath{\varsigma}}",
+    "σ": r"{\ensuremath{\sigma}}", "τ": r"{\ensuremath{\tau}}",
+    "υ": r"{\ensuremath{\upsilon}}", "φ": r"{\ensuremath{\varphi}}",
+    "χ": r"{\ensuremath{\chi}}", "ψ": r"{\ensuremath{\psi}}",
+    "ω": r"{\ensuremath{\omega}}",
+    "ϕ": r"{\ensuremath{\phi}}", "ϵ": r"{\ensuremath{\epsilon}}",
+    # Greek uppercase (the letters with TeX macros of their own)
+    "Γ": r"{\ensuremath{\Gamma}}", "Δ": r"{\ensuremath{\Delta}}",
+    "Θ": r"{\ensuremath{\Theta}}", "Λ": r"{\ensuremath{\Lambda}}",
+    "Ξ": r"{\ensuremath{\Xi}}", "Π": r"{\ensuremath{\Pi}}",
+    "Σ": r"{\ensuremath{\Sigma}}", "Υ": r"{\ensuremath{\Upsilon}}",
+    "Φ": r"{\ensuremath{\Phi}}", "Ψ": r"{\ensuremath{\Psi}}",
+    "Ω": r"{\ensuremath{\Omega}}",
+    # Math and text symbols
+    "§": r"{\S}", "¶": r"{\P}",
+    "±": r"{\ensuremath{\pm}}", "∓": r"{\ensuremath{\mp}}",
+    "×": r"{\ensuremath{\times}}", "·": r"{\ensuremath{\cdot}}",
+    "≤": r"{\ensuremath{\le}}", "≥": r"{\ensuremath{\ge}}",
+    "≠": r"{\ensuremath{\ne}}", "≈": r"{\ensuremath{\approx}}",
+    "∞": r"{\ensuremath{\infty}}", "∂": r"{\ensuremath{\partial}}",
+    "∇": r"{\ensuremath{\nabla}}", "ℓ": r"{\ensuremath{\ell}}",
+    "ℏ": r"{\ensuremath{\hbar}}", "†": r"{\ensuremath{\dagger}}",
+    "′": r"{\ensuremath{'}}", "…": r"{\dots}",
+    "⊗": r"{\ensuremath{\otimes}}", "⊕": r"{\ensuremath{\oplus}}",
+    "→": r"{\ensuremath{\to}}", "↦": r"{\ensuremath{\mapsto}}",
+    "∈": r"{\ensuremath{\in}}", "⊂": r"{\ensuremath{\subset}}",
+    "⊆": r"{\ensuremath{\subseteq}}",
+    # Spacing and dashes (``_detex`` maps ``~`` and TeX dashes to these)
+    " ": "~", "–": "--", "—": "---",
+}
+# Combining accents that ``_detex`` introduces, back to their TeX commands.
+_COMBINING_TO_TEX = {
+    "̀": "`", "́": "'", "̂": "^", "̃": "~", "̈": '"',
+}
+_COMBINING_RE = re.compile(
+    "([A-Za-z])([" + "".join(_COMBINING_TO_TEX) + "])")
+
+
 def _bib_escape(s: str) -> str:
-    """Escape TeX-special characters for a printable BibTeX field."""
-    return re.sub(r"([&%#_])", r"\\\1", s)
+    """Escape a string into an ASCII-safe BibTeX field value.
+
+    TeX specials are backslash-escaped, and the non-ASCII output of
+    ``_detex`` (Greek letters, accented letters, the section sign, ties
+    and dashes) is folded back to brace-protected TeX macros so classic
+    non-Unicode BibTeX engines read the generated ``.bib``.  Any other
+    non-ASCII character is transliterated to its closest ASCII form, or
+    dropped — never emitted raw.
+    """
+    s = re.sub(r"([&%#_])", r"\\\1", s)
+    s = unicodedata.normalize("NFD", s)
+    s = _COMBINING_RE.sub(
+        lambda m: "{\\" + _COMBINING_TO_TEX[m.group(2)] + "{" + m.group(1) + "}}",
+        s)
+    return "".join(
+        ch if ord(ch) < 0x80
+        else _UNICODE_TO_TEX.get(
+            ch,
+            unicodedata.normalize("NFKD", ch).encode("ascii", "ignore").decode())
+        for ch in s)
 
 
 class Note:
@@ -313,7 +384,7 @@ class Note:
         return m.group(1) if m else str(datetime.date.today().year)
 
     def bibtex(self, cfg: Config) -> str:
-        title = _bib_escape(self.title.replace("\u2013", "--").replace("\u2014", "---"))
+        title = _bib_escape(self.title)
         return (
             f"@techreport{{gap:{self.slug},\n"
             f"  author      = {{{cfg.bib_author}}},\n"
