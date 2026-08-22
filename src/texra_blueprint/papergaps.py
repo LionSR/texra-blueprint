@@ -85,8 +85,9 @@ KIND_SEVERITY = {
 }
 SEVERITIES = ("high", "medium", "low")
 _SEV_ORDER = {sev: rank for rank, sev in enumerate(SEVERITIES)}
+LIVE_STATUSES = ("open", "wip")
 SETTLED_STATUSES = ("resolved", "historical")
-STATUSES = {"open", *SETTLED_STATUSES}
+STATUSES = {*LIVE_STATUSES, *SETTLED_STATUSES}
 
 _DATE_LINE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _VERSION_SUFFIX_RE = re.compile(r"[_-]v\d+$")
@@ -291,8 +292,12 @@ class Note:
 
     @property
     def live(self) -> bool:
-        """A note that still names unresolved mathematical debt."""
-        return self.status == "open"
+        """A note that still names unresolved mathematical debt.
+
+        ``open`` and ``wip`` are both live; ``wip`` marks a gap whose
+        elimination is actively underway.
+        """
+        return self.status in LIVE_STATUSES
 
     @property
     def settled(self) -> bool:
@@ -533,8 +538,13 @@ def build_site(cfg: Config, out: Path) -> None:
             cited = (f' <span class="n">\u00b7 cited \u00d7{n.citations}</span>'
                      if n.citations else "")
             row_class = ' class="settled"' if n.settled else ""
+            # The date column shows the note's last git modification — the
+            # staleness signal — while the authored \date feeds the BibTeX year.
+            shown_date = cfg.git_date(cfg.gaps / f"{n.slug}.tex")
+            if shown_date == "n.d.":
+                shown_date = n.date
             rows.append(
-                f'<tr{row_class}><td class="date">{html.escape(n.date)}</td>'
+                f'<tr{row_class}><td class="date">{html.escape(shown_date)}</td>'
                 f'<td><a href="{n.slug}.pdf">{html.escape(n.title)}</a>{_chips(n)}{cited} '
                 f'<span class="n">(<a href="{cfg.blob_base}/{n.slug}.tex">tex</a>)</span>'
                 f"</td></tr>")
@@ -547,10 +557,12 @@ def build_site(cfg: Config, out: Path) -> None:
             f'<a href="{policy_stem}.pdf">policy note</a>. ')
     live = [n for n in notes.values() if n.live]
     high = [n for n in live if n.severity == "high"]
+    wip = [n for n in live if n.status == "wip"]
     settled = [n for n in notes.values() if n.settled]
     untagged = [n for n in notes.values() if n.kind is None]
     summary = (f"{len(notes)} notes: {len(live)} open"
                + (f" ({len(high)} high-severity)" if high else "")
+               + (f", {len(wip)} in progress" if wip else "")
                + f", {len(settled)} resolved or historical"
                + (f", {len(untagged)} untagged" if untagged else "") + ".")
     body = f"""<h1>{html.escape(cfg.title)}</h1>

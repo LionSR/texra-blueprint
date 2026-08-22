@@ -211,3 +211,20 @@ def test_check_require_verdict(tmp_path, capsys):
     untagged.write_text("\\title{Untagged}\n\\date{2026-08-22}\n")
     assert check(Config.load(tmp_path / "repo")) == 1
     assert "verdict marker" in capsys.readouterr().out
+
+
+def test_wip_status_is_live():
+    from texra_blueprint.papergaps import Note
+    n = Note("demo_x", kind="open-gap", status="wip")
+    assert n.live and not n.settled
+
+
+def test_index_shows_git_modified_date(tmp_path):
+    cfg = Config.load(FIXTURE)
+    build_site(cfg, tmp_path / "out")
+    index = (tmp_path / "out" / "index.html").read_text()
+    # the fixture notes' authored \date is 2026-08-22; the git-modified date
+    # of the scope-restriction note (last touched when its verdict marker
+    # landed) is what the column shows
+    expected = cfg.git_date(cfg.gaps / "demo_scope_restriction.tex")
+    assert expected != "n.d." and expected in index
