@@ -179,3 +179,35 @@ def test_check_rejects_version_suffix(tmp_path, capsys):
     assert check(Config.load(root)) == 1
     out = capsys.readouterr().out
     assert out.count("carries a version suffix") == 2
+
+
+def test_gapnote_verdict_parsing():
+    cfg = Config.load(FIXTURE)
+    open_note = parse_note(cfg, cfg.gaps / "demo_scope_restriction.tex")
+    assert (open_note.kind, open_note.status, open_note.severity) == (
+        "scope-restriction", "open", "medium")
+    assert open_note.live
+    resolved = parse_note(cfg, cfg.gaps / "demo_local_fix.tex")
+    assert resolved.status == "resolved" and not resolved.live
+
+
+def test_index_shows_severity_and_summary(tmp_path):
+    cfg = Config.load(FIXTURE)
+    build_site(cfg, tmp_path / "out")
+    index = (tmp_path / "out" / "index.html").read_text()
+    assert "1 open" in index and "1 resolved or historical" in index
+    assert 'class="chip medium">scope-restriction' in index
+    assert 'class="settled"' in index
+
+
+def test_check_require_verdict(tmp_path, capsys):
+    import shutil
+    from texra_blueprint.papergaps import check
+    shutil.copytree(FIXTURE, tmp_path / "repo")
+    toml = tmp_path / "repo" / "texra-blueprint.toml"
+    toml.write_text(toml.read_text().replace(
+        "[paper_gaps]", "[paper_gaps]\nrequire_verdict = true"))
+    untagged = tmp_path / "repo" / "docs" / "paper-gaps" / "demo_untagged_note.tex"
+    untagged.write_text("\\title{Untagged}\n\\date{2026-08-22}\n")
+    assert check(Config.load(tmp_path / "repo")) == 1
+    assert "verdict marker" in capsys.readouterr().out

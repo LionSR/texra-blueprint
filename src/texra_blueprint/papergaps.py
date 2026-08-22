@@ -66,6 +66,20 @@ from pathlib import Path
 
 REF_RE = re.compile(r"paper-gaps/([A-Za-z0-9_\-]+)\.tex")
 
+# The verdict marker inside a note: \gapnote{<kind>}{<status>}.  Kind comes
+# from the policy's classification; severity is derived from it, never a
+# separately maintained field.  Status: open | resolved | historical.
+GAPNOTE_RE = re.compile(r"\\gapnote\{([a-z\-]+)\}\{([a-z]+)\}")
+KIND_SEVERITY = {
+    "unfaithful": "high",
+    "false-source": "high",
+    "open-gap": "high",
+    "scope-restriction": "medium",
+    "local-correction": "medium",
+    "clarification": "low",
+}
+STATUSES = {"open", "resolved", "historical"}
+
 
 def source_key(slug: str, sources: dict[str, str]) -> str | None:
     """The registered source key naming ``slug``, by longest-prefix match.
@@ -102,6 +116,7 @@ class Config:
     sources: dict[str, str]
     aliases: dict[str, str]
     group_aliases: dict[str, str]
+    require_verdict: bool = False
 
     @classmethod
     def load(cls, root: Path) -> "Config":
@@ -126,6 +141,7 @@ class Config:
             | {"references.bib"},
             policy=c.get("policy", "policy.tex"),
             sources=dict(c.get("sources", {})),
+            require_verdict=bool(c.get("require_verdict", False)),
             aliases=dict(c.get("aliases", {})),
             group_aliases=dict(c.get("group_aliases", {})),
         )
@@ -189,6 +205,17 @@ class Note:
     title: str = ""
     date: str = ""
     citations: int = 0
+    kind: str | None = None
+    status: str | None = None
+
+    @property
+    def severity(self) -> str | None:
+        return KIND_SEVERITY.get(self.kind or "")
+
+    @property
+    def live(self) -> bool:
+        """A note that still names unresolved mathematical debt."""
+        return self.status == "open"
 
     @property
     def year(self) -> str:
@@ -220,6 +247,13 @@ def parse_note(cfg: Config, path: Path) -> Note:
         _git_date(cfg, path) if "today" in raw_date or not raw_date
         else raw_date.strip()
     )
+    m = GAPNOTE_RE.search(tex)
+    if m:
+        kind, status = m.group(1), m.group(2)
+        if kind in KIND_SEVERITY:
+            note.kind = kind
+        if status in STATUSES:
+            note.status = status
     return note
 
 
@@ -282,6 +316,22 @@ def check(cfg: Config) -> int:
             print(f"::error::legacy alias '{old}' points at '{new}.tex', "
                   f"which does not exist")
             failures += 1
+    untagged = []
+    for p in sorted(cfg.gaps.glob("*.tex")):
+        if p.name in cfg.skip or p.name == cfg.policy:
+            continue
+        note = parse_note(cfg, p)
+        if note.kind is None or note.status is None:
+            untagged.append(p.name)
+    if untagged:
+        msg = (f"{len(untagged)} notes lack a valid "
+               f"\\gapnote{{kind}}{{status}} verdict marker")
+        if cfg.require_verdict:
+            print(f"::error::{msg}: " + ", ".join(untagged[:5])
+                  + ("..." if len(untagged) > 5 else ""))
+            failures += len(untagged)
+        else:
+            print(f"::warning::{msg}")
     if not failures:
         print(f"paper-gaps check: {len(counts)} referenced slugs resolve, "
               f"all note names carry registered source keys")
@@ -305,7 +355,30 @@ table { border-collapse:collapse; width:100%; font-size:.95rem; }
 td { padding:.3rem .5rem .3rem 0; vertical-align:top; }
 td.date { white-space:nowrap; width:6.5rem; font-size:.85rem; }
 span.n { font-size:.8rem; white-space:nowrap; }
+span.chip { font-size:.72rem; border:1px solid #ccc; border-radius:.6rem;
+  padding:0 .4rem; margin-left:.3rem; white-space:nowrap; color:#555; }
+span.chip.high { color:#a33; border-color:#a33; }
+span.chip.medium { color:#a60; border-color:#a60; }
+tr.settled td, tr.settled a { opacity:.55; }
 """
+
+
+_SEV_ORDER = {"high": 0, "medium": 1, "low": 2, None: 3}
+
+
+def _note_sort_key(n: Note):
+    return (0 if n.live or n.status is None else 1,
+            _SEV_ORDER.get(n.severity, 3), n.slug)
+
+
+def _chips(n: Note) -> str:
+    out = ""
+    if n.kind:
+        sev = n.severity or ""
+        out += f' <span class="chip {sev}">{n.kind}</span>'
+    if n.status and n.status != "open":
+        out += f' <span class="chip">{n.status}</span>'
+    return out
 
 
 def build_site(cfg: Config, out: Path) -> None:
@@ -343,7 +416,7 @@ def build_site(cfg: Config, out: Path) -> None:
 
     rows = []
     for g in ordered:
-        members = sorted(groups[g], key=lambda n: n.slug)
+        members = sorted(groups[g], key=_note_sort_key)
         keys = ", ".join(
             [g] + sorted(k for k, v in cfg.group_aliases.items() if v == g))
         heading = f"{keys} \u00b7 {cfg.sources[g]}" if g in cfg.sources else keys
@@ -352,9 +425,11 @@ def build_site(cfg: Config, out: Path) -> None:
         for n in members:
             cited = (f' <span class="n">\u00b7 cited \u00d7{n.citations}</span>'
                      if n.citations else "")
+            row_class = (' class="settled"'
+                         if n.status in ("resolved", "historical") else "")
             rows.append(
-                f'<tr><td class="date">{html.escape(n.date)}</td>'
-                f'<td><a href="{n.slug}.pdf">{html.escape(n.title)}</a>{cited} '
+                f'<tr{row_class}><td class="date">{html.escape(n.date)}</td>'
+                f'<td><a href="{n.slug}.pdf">{html.escape(n.title)}</a>{_chips(n)}{cited} '
                 f'<span class="n">(<a href="{cfg.blob_base}/{n.slug}.tex">tex</a>)</span>'
                 f"</td></tr>")
         rows.append("</table>")
@@ -364,6 +439,14 @@ def build_site(cfg: Config, out: Path) -> None:
         policy_line = (
             f'The conventions are stated in the '
             f'<a href="{policy_stem}.pdf">policy note</a>. ')
+    live = [n for n in notes.values() if n.live]
+    high = [n for n in live if n.severity == "high"]
+    settled = [n for n in notes.values() if n.status in ("resolved", "historical")]
+    untagged = [n for n in notes.values() if n.kind is None]
+    summary = (f"{len(notes)} notes: {len(live)} open"
+               + (f" ({len(high)} high-severity)" if high else "")
+               + f", {len(settled)} resolved or historical"
+               + (f", {len(untagged)} untagged" if untagged else "") + ".")
     page = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -377,7 +460,7 @@ def build_site(cfg: Config, out: Path) -> None:
 <p class="lede">Mathematical notes recording each discrepancy between a cited
 source and the <a href="../">formal development</a>: missing hypotheses,
 scalar corrections, scope restrictions, and replacement proof routes.
-{len(notes)} notes, grouped by source. {policy_line}Cite a note by its
+{html.escape(summary)} Grouped by source. {policy_line}Cite a note by its
 permanent URL <code>{cfg.site_base}/paper-gaps/&lt;name&gt;.pdf</code> or via
 <a href="paper-gaps.bib">paper-gaps.bib</a>.</p>
 {''.join(rows)}
