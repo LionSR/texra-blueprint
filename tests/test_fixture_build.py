@@ -70,7 +70,10 @@ def test_chapter_and_subset_graphs(built_site):
     assert chapter.exists() and cone.exists()
     cone_text = cone.read_text()
     assert "thm:base_result" in cone_text and "thm:dependent_result" in cone_text
-    # TOC links the extra graphs
-    index = (web / "index.html").read_text()
-    assert "Dependent-result cone" in index
-    assert "Chapter 1 graph" in index
+    # the chooser page lists every graph with node counts, and the TOC links it
+    chooser = (web / "dep_graphs.html").read_text()
+    assert "Dependent-result cone" in chooser
+    assert "Chapter 1" in chooser and "nodes)" in chooser
+    assert "Dependency graphs" in (web / "index.html").read_text()
+    # each graph page carries the injected selector
+    assert "<select" in cone_text and "all graphs" in cone_text
