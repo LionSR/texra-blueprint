@@ -464,6 +464,8 @@ span.chip { font-size:.72rem; border:1px solid #ccc; border-radius:.6rem;
 span.chip.high { color:#a33; border-color:#a33; }
 span.chip.medium { color:#a60; border-color:#a60; }
 tr.settled td, tr.settled a { opacity:.55; }
+ul.legend { font-size:.9rem; color:#555; padding-left:1.2rem; }
+ul.legend li { margin:.15rem 0; }
 """
 
 
@@ -530,19 +532,37 @@ def build_site(cfg: Config, out: Path) -> None:
         "\n\n".join(notes[s].bibtex(cfg) for s in sorted(notes)) + "\n",
         encoding="utf-8")
 
-    groups = _group_table(cfg, notes)
-    ordered = sorted(groups, key=lambda g: (-len(groups[g][1]), g))
+    # The page classifies by STATUS: open debt first, then work in progress,
+    # then the settled archive. Source keys become per-row chips, and the
+    # registry survives as a legend at the bottom.
+    def note_key(n: Note) -> str:
+        key = source_key(n.slug, cfg.sources) or n.slug
+        return cfg.group_aliases.get(key, key)
+
+    sections = [
+        ("Open", [n for n in notes.values() if n.status == "open"], ""),
+        ("In progress", [n for n in notes.values() if n.status == "wip"], ""),
+        ("Resolved and historical",
+         [n for n in notes.values() if n.settled], ' class="settled"'),
+    ]
+    untagged_notes = [n for n in notes.values()
+                      if not n.live and not n.settled]
+    if untagged_notes:
+        sections.insert(2, ("Untagged", untagged_notes, ""))
 
     rows = []
-    for g in ordered:
-        heading, members = groups[g]
-        members = sorted(members, key=_note_sort_key)
-        rows.append(f"<h2>{html.escape(heading)} <small>{len(members)}</small></h2>")
+    for sec_heading, members, row_class in sections:
+        if not members:
+            continue
+        members = sorted(members, key=lambda n: (
+            _SEV_ORDER.get(n.severity, len(SEVERITIES)), note_key(n), n.slug))
+        rows.append(f"<h2>{html.escape(sec_heading)} "
+                    f"<small>{len(members)}</small></h2>")
         rows.append("<table>")
         for n in members:
             cited = (f' <span class="n">\u00b7 cited \u00d7{n.citations}</span>'
                      if n.citations else "")
-            row_class = ' class="settled"' if n.settled else ""
+            key_chip = f' <span class="chip">{html.escape(note_key(n))}</span>'
             # The date column shows the note's last git modification — the
             # staleness signal — while the authored \date feeds the BibTeX year.
             shown_date = cfg.git_date(cfg.gaps / f"{n.slug}.tex")
@@ -550,10 +570,20 @@ def build_site(cfg: Config, out: Path) -> None:
                 shown_date = n.date
             rows.append(
                 f'<tr{row_class}><td class="date">{html.escape(shown_date)}</td>'
-                f'<td><a href="{n.slug}.pdf">{html.escape(n.title)}</a>{_chips(n)}{cited} '
+                f'<td><a href="{n.slug}.pdf">{html.escape(n.title)}</a>'
+                f'{key_chip}{_chips(n)}{cited} '
                 f'<span class="n">(<a href="{cfg.blob_base}/{n.slug}.tex">tex</a>)</span>'
                 f"</td></tr>")
         rows.append("</table>")
+
+    # Sources legend: the registry, with per-key counts.
+    groups = _group_table(cfg, notes)
+    rows.append('<h2>Sources <small>legend</small></h2><ul class="legend">')
+    for g in sorted(groups, key=lambda g: (-len(groups[g][1]), g)):
+        g_heading, g_members = groups[g]
+        rows.append(f"<li>{html.escape(g_heading)} "
+                    f'<span class="n">({len(g_members)})</span></li>')
+    rows.append("</ul>")
 
     policy_line = ""
     if (cfg.gaps / cfg.policy).exists():
@@ -574,7 +604,8 @@ def build_site(cfg: Config, out: Path) -> None:
 <p class="lede">Mathematical notes recording each discrepancy between a cited
 source and the <a href="../">formal development</a>: missing hypotheses,
 scalar corrections, scope restrictions, and replacement proof routes.
-{html.escape(summary)} Grouped by source. {policy_line}Cite a note by its
+{html.escape(summary)} Classified by status; source keys in the legend below.
+{policy_line}Cite a note by its
 permanent URL <code>{cfg.site_base}/paper-gaps/&lt;name&gt;.pdf</code> or via
 <a href="paper-gaps.bib">paper-gaps.bib</a>.</p>
 {''.join(rows)}"""

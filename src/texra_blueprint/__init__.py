@@ -9,4 +9,4 @@ and adding ``\\usepackage{texra_patches}`` to the web document.  The command
 line tool ``texra-blueprint`` serves the paper-gaps site machinery.
 """
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
