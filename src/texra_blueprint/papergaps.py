@@ -44,6 +44,22 @@ from pathlib import Path
 REF_RE = re.compile(r"paper-gaps/([A-Za-z0-9_\-]+)\.tex")
 
 
+def source_key(slug: str, sources: dict[str, str]) -> str | None:
+    """The registered source key naming ``slug``, by longest-prefix match.
+
+    A key matches when the slug is the key itself or continues it with an
+    underscore or hyphen — so ``cpsv16_ft_gap``, ``issue-1234-divergence``
+    (key ``issue``), and a full-stem key all resolve, whatever the
+    separator convention.
+    """
+    best = None
+    for key in sources:
+        if slug == key or slug.startswith(key + "_") or slug.startswith(key + "-"):
+            if best is None or len(key) > len(best):
+                best = key
+    return best
+
+
 # --------------------------------------------------------------------------
 # Configuration
 
@@ -143,10 +159,6 @@ class Note:
     citations: int = 0
 
     @property
-    def prefix(self) -> str:
-        return self.slug.split("_", 1)[0]
-
-    @property
     def year(self) -> str:
         m = re.match(r"(\d{4})", self.date)
         return m.group(1) if m else "n.d."
@@ -220,7 +232,7 @@ def check(cfg: Config) -> int:
     for p in sorted(cfg.gaps.glob("*.tex")):
         if p.name in cfg.skip or p.name == cfg.policy:
             continue
-        if p.stem.split("_", 1)[0] not in cfg.sources:
+        if source_key(p.stem, cfg.sources) is None:
             print(f"::error::paper-gap note '{p.name}' does not start with a "
                   f"registered source key (see [paper_gaps.sources] in "
                   f"texra-blueprint.toml)")
@@ -274,7 +286,8 @@ def build_site(cfg: Config, out: Path) -> None:
 
     groups: dict[str, list[Note]] = {}
     for n in notes.values():
-        groups.setdefault(n.prefix, []).append(n)
+        key = source_key(n.slug, cfg.sources) or n.slug.split("_", 1)[0]
+        groups.setdefault(key, []).append(n)
     for g in [g for g, ms in groups.items() if len(ms) == 1]:
         groups.setdefault("misc", []).extend(groups.pop(g))
     ordered = sorted((g for g in groups if g != "misc"),
