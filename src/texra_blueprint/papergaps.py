@@ -637,11 +637,11 @@ def build_site(cfg: Config, out: Path) -> None:
             cited = (f' <span class="n">\u00b7 cited \u00d7{n.citations}</span>'
                      if n.citations else "")
             key_chip = f' <span class="chip">{html.escape(note_key(n))}</span>'
-            # The date column shows the note's last git modification — the
-            # staleness signal — while the authored \date feeds the BibTeX year.
-            shown_date = cfg.git_date(cfg.gaps / f"{n.slug}.tex")
-            if shown_date == "n.d.":
-                shown_date = n.date
+            # The date column shows the authored \date; git last-modified is
+            # only the fallback (a note without \date, or with \date{\today}).
+            # Git dates are wrong across repo migrations — the adopting
+            # commit stamps every imported note with the migration day.
+            shown_date = n.date or "n.d."
             rows.append(
                 f'<tr{row_class}><td class="date">{html.escape(shown_date)}</td>'
                 f'<td><a href="{n.slug}.pdf">{html.escape(n.title)}</a>'

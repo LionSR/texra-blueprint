@@ -263,15 +263,34 @@ def test_wip_status_is_live():
     assert n.live and not n.settled
 
 
-def test_index_shows_git_modified_date(tmp_path):
-    cfg = Config.load(FIXTURE)
+def test_index_prefers_authored_date_over_git(tmp_path):
+    # Git last-modified dates are wrong across repo migrations (the adopting
+    # commit stamps every imported note with the migration day), so the date
+    # column shows the authored \date and uses git only as the fallback.
+    import shutil
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repo)
+    note = repo / "docs" / "paper-gaps" / "demo_scope_restriction.tex"
+    note.write_text(note.read_text().replace(
+        "\\date{2026-08-22}", "\\date{2001-02-03}"))
+    cfg = Config.load(repo)
     build_site(cfg, tmp_path / "out")
     index = (tmp_path / "out" / "index.html").read_text()
-    # the fixture notes' authored \date is 2026-08-22; the git-modified date
-    # of the scope-restriction note (last touched when its verdict marker
-    # landed) is what the column shows
-    expected = cfg.git_date(cfg.gaps / "demo_scope_restriction.tex")
-    assert expected != "n.d." and expected in index
+    assert "2001-02-03" in index
+
+
+def test_index_falls_back_to_git_date_without_authored_date(tmp_path):
+    import shutil
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repo)
+    note = repo / "docs" / "paper-gaps" / "demo_scope_restriction.tex"
+    note.write_text(note.read_text().replace(
+        "\\date{2026-08-22}", "\\date{\\today}"))
+    cfg = Config.load(repo)
+    build_site(cfg, tmp_path / "out")
+    index = (tmp_path / "out" / "index.html").read_text()
+    # the tmp copy has no git history, so the fallback resolves to "n.d."
+    assert 'class="date">n.d.<' in index
 
 
 def test_gapref_references_are_scanned(tmp_path):

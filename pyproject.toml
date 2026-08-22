@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "texra-blueprint"
-version = "0.3.6"
+version = "0.3.7"
 description = "Shared plasTeX plugin and site tooling for Lean blueprint projects"
 readme = "README.md"
 license = { text = "Apache-2.0" }
