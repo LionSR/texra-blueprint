@@ -228,3 +228,21 @@ def test_index_shows_git_modified_date(tmp_path):
     # landed) is what the column shows
     expected = cfg.git_date(cfg.gaps / "demo_scope_restriction.tex")
     assert expected != "n.d." and expected in index
+
+
+def test_gapref_references_are_scanned(tmp_path):
+    import shutil
+    from texra_blueprint.papergaps import check, scan_references
+    shutil.copytree(FIXTURE, tmp_path / "repo")
+    ch = tmp_path / "repo" / "blueprint" / "src" / "web.tex"
+    text = ch.read_text().replace(
+        "\\path{docs/paper-gaps/demo_scope_restriction.tex}",
+        "\\gapref{demo_scope_restriction}")
+    ch.write_text(text)
+    cfg = Config.load(tmp_path / "repo")
+    counts, _ = scan_references(cfg)
+    assert counts["demo_scope_restriction"] >= 1
+    assert check(cfg) == 0
+    # a gapref to a missing note fails check
+    ch.write_text(text + "\n% \\gapref{demo_missing_note}\n")
+    assert check(cfg) == 1

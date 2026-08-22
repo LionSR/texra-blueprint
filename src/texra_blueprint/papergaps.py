@@ -69,7 +69,11 @@ from pathlib import Path
 from texra_blueprint.config import load_table
 from texra_blueprint.pages import html_page
 
-REF_RE = re.compile(r"paper-gaps/([A-Za-z0-9_\-]+)\.tex")
+# A note is referenced either by its repository path or by the blueprint's
+# \gapref{<slug>} macro, which links the published PDF from the prose.
+REF_RE = re.compile(
+    r"paper-gaps/([A-Za-z0-9_\-]+)\.tex"
+    r"|\\gapref\{([A-Za-z0-9_\-]+)\}")
 
 # The verdict marker inside a note: \gapnote{<kind>}{<status>}.  Kind comes
 # from the policy's classification; severity is derived from it, never a
@@ -352,7 +356,7 @@ def scan_references(cfg: Config) -> tuple[Counter, dict[str, set[str]]]:
     for root in roots:
         if not root.exists():
             continue
-        for pattern in ("*.lean", "*.tex", "*.md"):
+        for pattern in ("*.lean", "*.tex", "*.md", "*.tsv"):
             for f in root.rglob(pattern):
                 if f in seen or not f.is_file():
                     continue
@@ -361,7 +365,8 @@ def scan_references(cfg: Config) -> tuple[Counter, dict[str, set[str]]]:
                     text = f.read_text(encoding="utf-8")
                 except (UnicodeDecodeError, OSError):
                     continue
-                for slug in REF_RE.findall(text):
+                for path_slug, gapref_slug in REF_RE.findall(text):
+                    slug = path_slug or gapref_slug
                     if f.stem == slug:
                         continue
                     counts[slug] += 1
