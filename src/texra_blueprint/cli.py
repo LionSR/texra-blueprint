@@ -36,6 +36,17 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument(
         "--force", action="store_true", help="overwrite existing files")
 
+    bblp = sub.add_parser(
+        "bbl", help="generate the blueprint .bbl for plasTeX from \\cite keys")
+    bblp.add_argument(
+        "--src-dir", type=Path, default=Path("blueprint/src"),
+        help="blueprint TeX source directory, resolved against --root when "
+        "relative (default: blueprint/src)")
+    bblp.add_argument("--tex", default="web.tex")
+    bblp.add_argument("--default-style", default="alpha")
+    bblp.add_argument(
+        "--keys", help="Comma-separated citation keys, or '*' for all entries.")
+
     webp = sub.add_parser(
         "web", help="leanblueprint web with a strict renderer-failure gate")
     webp.add_argument(
@@ -43,6 +54,14 @@ def main(argv: list[str] | None = None) -> int:
         help="arguments passed through to leanblueprint web")
 
     args = parser.parse_args(argv)
+
+    if args.command == "bbl":
+        # Imported here so the pybtex requirement only binds this subcommand.
+        from texra_blueprint import bbl
+        src_dir = args.src_dir if args.src_dir.is_absolute() \
+            else args.root.resolve() / args.src_dir
+        return bbl.run(src_dir, tex=args.tex,
+                       default_style=args.default_style, keys=args.keys)
 
     if args.command == "web":
         extra = args.web_args

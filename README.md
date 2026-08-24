@@ -65,6 +65,20 @@ texra-blueprint paper-gaps site OUT    # index + PDFs + paper-gaps.bib
 notes directory. The package copy is the single source of these files;
 existing files are kept untouched unless `--force`.
 
+The web bibliography (replacing the per-repo `scripts/blueprint_bibtex.py`
+copies):
+
+```bash
+texra-blueprint bbl                    # blueprint/src/web.bbl from \cite keys
+```
+
+scans the reachable blueprint TeX sources for `\cite` keys and
+`\bibliography` files, then renders the cited entries with pybtex into the
+`.bbl` file plasTeX needs, next to the entry TeX file (`--src-dir`, `--tex`,
+`--default-style`, `--keys` override the defaults shown). With the `alpha`
+style, entries carrying `type = {Paper-gap note}` are labelled by their
+entry-key slug instead of a degenerate author/year alpha label.
+
 The strict web build:
 
 ```bash
