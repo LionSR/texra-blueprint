@@ -63,6 +63,7 @@ from plasTeX import Base, Command, DimenCommand, Environment, Token
 from plasTeX import sourceChildren as _source_children
 from plasTeX.Base.LaTeX import Crossref as _crossref
 from plasTeX.Base.LaTeX.Arrays import Array as _Array
+from plasTeX.Base.LaTeX.Math import MathEnvironment as _MathEnvironment
 from plastexdepgraph.Packages import depgraph as _depgraph
 
 
@@ -601,6 +602,28 @@ for _macro_class in (
     _amsmath.eqref,
 ):
     _read_argument_as_written(_macro_class, _REFERENCE_KEY_CHARACTERS)
+
+
+# --- HTML targets for every label in a display ----------------------------
+
+
+def _secondary_math_label_ids(self) -> list[str]:
+    """Labels on rows are not rendered when MathJax receives the whole display.
+
+    Keep the display's existing id, and emit each other parsed label once.
+    Reading label nodes rather than TeX text excludes commented-out labels.
+    """
+    seen = {self.id}
+    labels = []
+    for node in self.getElementsByTagName("label"):
+        label = _normalize_label(node.attributes.get("label", ""))
+        if label and label not in seen:
+            seen.add(label)
+            labels.append(label)
+    return labels
+
+
+_MathEnvironment.secondary_math_label_ids = property(_secondary_math_label_ids)
 
 
 # --- a bracket opening a row is mathematics -------------------------------
