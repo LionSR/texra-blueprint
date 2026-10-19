@@ -36,3 +36,9 @@ name: active::&
 
 name: |
 |
+
+name: displaymath equation* eqnarray eqnarray* align align* gather gather* flalign flalign* multline multline* alignat alignat* split
+<div class="displaymath" id="{{ obj.id }}">
+  {% for label in obj.secondary_math_label_ids %}<span id="{{ label | e }}"></span>{% endfor %}
+  {{ obj.mathjax_source }}
+</div>

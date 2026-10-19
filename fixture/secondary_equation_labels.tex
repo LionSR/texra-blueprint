@@ -1,0 +1,22 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{texra_patches}
+\begin{document}
+References: \ref{eq:first_row}, \ref{eq:second_row}, \ref{eq:third_row},
+\ref{eq:gather_first}, \ref{eq:gather_second}, \ref{eq:single}.
+\begin{align}
+ a &= b, \label{eq:first_row}\\
+ c &= d, \label{eq:second_row}\\
+ e &= f. \label{eq:third_row}
+\end{align}
+\begin{gather}
+ g=h, \label{eq:gather_first}\\
+ i=j. \label{eq:gather_second}
+\end{gather}
+\begin{equation}
+ k=l. \label{eq:single}
+\end{equation}
+\begin{align*}
+ u &= v. % \label{eq:comment_only}
+\end{align*}
+\end{document}
